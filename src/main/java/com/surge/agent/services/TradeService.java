@@ -1,7 +1,5 @@
 package com.surge.agent.services;
 
-
-import com.surge.agent.enums.TradeAction;
 import com.surge.agent.model.TradeIntent;
 import com.surge.agent.model.TradeSignal;
 import com.surge.agent.dto.AITradeDecision;
@@ -16,114 +14,70 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.web3j.crypto.Hash;
-import org.web3j.protocol.Web3j;
-import org.web3j.utils.Numeric;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
-/**
- * TradeService — V3 final.
- *
- * Fixes vs the V2 version that was provided:
- *
- *   1. Python /analyze is now called to get AITradeDecision BEFORE building
- *      the TradeIntent. V2 skipped this entirely — the trade executed with no
- *      AI reasoning and the validation artifact had no agent verdicts.
- *
- *   2. minAmountOut is now slippage-protected (ATR-based). V2 hardcoded
- *      BigInteger.ZERO, meaning the router would accept any amount out —
- *      infinite slippage. This makes the risk guard "FAILED".
- *
- *   3. riskHash now uses keccak256 (Solidity-compatible). V2 used SHA-256,
- *      which produces a valid 32-byte array but doesn't match anything the
- *      router can verify.
- *
- *   4. ValidationService.postTradeArtifact() is now called with the full
- *      signature: (intent, risk, decision, marketState, entryPrice, txHash,
- *      blockNumber). V2 called the old 3-arg version with no decision.
- *
- *   5. TradeRecord is registered with TradeMonitorService after execution so
- *      TP/SL monitoring starts immediately and feedback loops back to Python.
- *
- *   6. HOLD and non-actionable decisions are skipped cleanly. V2 would have
- *      tried to build and submit a HOLD trade intent to the router.
- */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class TradeService {
 
-    private final IdentityService       identityService;
-    private final PythonAIClient        pythonAIClient;
-    private final BlockchainService     blockchainService;
-    private final ValidationService     validationService;
-    private final TradeMonitorService   tradeMonitorService;
+    private final IdentityService identityService;
+    private final PythonAIClient pythonAIClient;
+    private final BlockchainService blockchainService;
+    private final ValidationService validationService;
+    private final TradeMonitorService tradeMonitorService;
     private final MarketDataService marketDataService;
     private final RiskManagementService riskService;
     private final EIP712Signer eip712Signer;
-    private final Web3j                 web3j;
     private final NewsAggregator newsAggregator;
 
     @Value("${contract.usdc}")
     private String usdcAddress;
 
-    @Value("${contract.weth:}")
+    @Value("${contract.weth}")
     private String wethAddress;
 
-    // ─────────────────────────────────────────────────────────────────────
-    // MAIN ENTRY POINT
-    // ─────────────────────────────────────────────────────────────────────
+    @Value("${trade.service.confidence}")
+    private Double tradeConfidence;
 
+    @Value("${trade.service.allowed_time}")
+    private Long tradeAllowedTime;
     /**
-     * Full V3 trade flow:
-     *
-     *   1. Guard checks (registered, circuit breaker)
-     *   2. Fetch MarketState + call Python /analyze
-     *   3. Skip if HOLD / low confidence / risk check fails
-     *   4. Build TradeIntent with slippage-protected minAmountOut
-     *   5. Compute keccak256 riskHash from AITradeDecision
-     *   6. EIP-712 sign
-     *   7. Execute on-chain, capture txHash + blockNumber
-     *   8. Post validation artifact (with full decision + market context)
-     *   9. Register TradeRecord for TP/SL monitoring
+     * Entry point for incoming trade signals.
      */
     public void processSignal(TradeSignal signal) {
         try {
-            // ── Guard 1: Identity ──────────────────────────────────────────
+            // ── Guard : Stall signal check  ────────────────────────
+            if (Instant.now().getEpochSecond() - signal.getTimestamp() > tradeAllowedTime) {
+                log.warn("Signal for {} is stale. Skipping.", signal.getAsset());
+                return;
+            }
+
+            // ── Guard : Identity & Circuit Breaker ────────────────────────
             if (!identityService.isRegistered()) {
-                log.error("Agent not registered — skipping trade. Call /api/agent/register-uri first.");
+                log.error("Agent not registered. Skipping signal for {}", signal.getTokenSymbol());
                 return;
             }
 
-            // ── Guard 2: Circuit breaker ───────────────────────────────────
             if (riskService.isCircuitBreakerTripped()) {
-                log.warn("Circuit breaker TRIPPED (drawdown >= 8%) — all new trades halted.");
+                log.warn("Circuit breaker TRIPPED (drawdown too high) — halting execution.");
                 return;
             }
 
-            BigInteger agentId = identityService.getAgentId();
-
-            // ── Step 1: Fetch current market state ─────────────────────────
+            // ── Fetch Market State ───────────────────────────────
             MarketState marketState = marketDataService.getLatestMarketState();
-            if (marketState == null) {
-                log.warn("No market state available — skipping trade.");
-                return;
-            }
-            double currentPrice = marketState.getCurrentPrice() != null
-                    ? marketState.getCurrentPrice().doubleValue() : 0.0;
-            if (currentPrice <= 0) {
-                log.warn("Invalid current price {} — skipping trade.", currentPrice);
+            if (marketState == null || marketState.getCurrentPrice().doubleValue() <= 0) {
+                log.warn("Invalid market state for signal {}", signal.getTokenSymbol());
                 return;
             }
 
-            // ── Step 2: Call Python AI council ─────────────────────────────
-            // This is the core fix: V2 skipped this entirely.
-            // analyzeMarket() posts to /api/v1/analyze with the full MarketState.
+            // ── AI Analysis (Brain) ───────────────────────────────
             String newsContext = newsAggregator.getAINewsContext();
-
             AITradeDecision decision = pythonAIClient.analyzeMarket(new AnalysisRequest(
                     marketState,
                     newsContext,
@@ -132,147 +86,131 @@ public class TradeService {
                     riskService.getVaultBalanceUsdc())
             );
 
-            log.info("AI decision: action={} confidence={} regime={} R:R={} tradeId={}",
-                    decision.getAction(), decision.getConfidence(),
-                    decision.getMarketRegime(), decision.getRewardRiskRatio(),
-                    decision.hasTradeId() ? decision.getTradeId() : "pending");
-
-            // ── Step 3: Skip non-actionable decisions ──────────────────────
-            if (!decision.isActionable()) {
-                log.info("AI returned {} — no trade submitted.", decision.getAction());
-                return;
-            }
-            if (decision.getConfidence() < 0.60) {
-                log.info("Confidence {} below floor 0.60 — skipping.", decision.getConfidence());
-                return;
-            }
-            if ("CRITICAL".equals(decision.getRiskLevel())) {
-                log.info("Risk level CRITICAL — skipping.");
+            // ── Risk Veto & Decision Filtering ────────────────────
+            if (!decision.isActionable() || decision.getConfidence() < tradeConfidence) {
+                log.info("Trade skipped: action={} confidence={}", decision.getAction(), decision.getConfidence());
                 return;
             }
 
-            // ── Step 4: Build TradeIntent ──────────────────────────────────
-            String tokenIn  = usdcAddress;
-            String tokenOut = (wethAddress != null && !wethAddress.isBlank())
-                    ? wethAddress : usdcAddress;
+            // Using RiskManagementService.isTradeSafe for fear/greed & spread checks
+            if (!riskService.isTradeSafe(decision, marketState.getSpread(), marketState.getFearGreedIndex())) {
+                log.warn("RiskManagementService vetoed the trade based on market conditions.");
+                // Post an artifact even though no TX was sent
+                validationService.postVetoArtifact(
+                        decision,    // Why the AI wanted it
+                        marketState, // What the market looked like
+                        "RISK_VETO: SPREAD_OR_FEAR"
+                );
+                return;
+            }
 
-            // Position size: 1000 USDC (6-decimal) for BUY; 0 for SELL
-            // In production replace with Kelly-sized amount from RiskManagementService
-            BigInteger amountIn = TradeAction.BUY.equals(decision.getAction())
-                    ? BigInteger.valueOf(1_000_000_000L)   // 1000 USDC (6 decimals)
-                    : BigInteger.ZERO;
-
-            // FIX: slippage-protected minAmountOut — never submit BigInteger.ZERO
-            BigInteger minAmountOut = computeMinAmountOut(amountIn, marketState);
-
-            // FIX: keccak256 riskHash (Solidity-compatible, matches router verify)
-            byte[] riskHash = computeRiskHash(decision);
-
-            TradeIntent intent = TradeIntent.builder()
-                    .agentId(agentId)
-                    .tokenIn(tokenIn)
-                    .tokenOut(tokenOut)
-                    .amountIn(amountIn)
-                    .minAmountOut(minAmountOut)
-                    .deadline(BigInteger.valueOf(Instant.now().getEpochSecond() + 600))
-                    .riskParams(riskHash)
-                    .build();
-
-            // ── Step 5: EIP-712 sign ───────────────────────────────────────
-            byte[] signature = eip712Signer.signTradeIntent(intent);
-
-            // ── Step 6: Execute on-chain ───────────────────────────────────
-            var receipt = blockchainService.executeTrade(intent, signature);
-            String txHash = receipt.getTransactionHash();
-            Long blockNumber = receipt.getBlockNumber() != null
-                    ? receipt.getBlockNumber().longValue() : null;
-
-            log.info("Trade executed | tx={} block={} action={} price={}",
-                    txHash.substring(0, 12) + "...", blockNumber,
-                    decision.getAction(), currentPrice);
-
-            // ── Step 7: Post validation artifact ──────────────────────────
-            // This is the critical fix: pass the full decision + marketState so
-            // the artifact contains agent verdicts, regime confidence, and all
-            // market context fields. V2 called the 3-arg version and got none of that.
-            byte[] artifactHash = validationService.postTradeArtifact(
-                    intent,
-                    null,            // RiskAssessment — pass if you have a separate Python risk call
-                    decision,
-                    marketState,
-                    currentPrice,
-                    txHash,
-                    blockNumber
-            );
-
-            // ── Step 8: Register with TradeMonitorService ──────────────────
-            // Resolves the tradeId from the decision (Python-issued) or falls back
-            // to the intent nonce. This is what links the monitoring to the artifact.
-            String tradeId = decision.hasTradeId()
-                    ? decision.getTradeId()
-                    : "intent_" + intent.getNonce();
-
-            TradeRecord record = TradeRecord.fromDecision(
-                    tradeId, agentId, currentPrice, intent, decision);
-            record.setExecutionTxHash(txHash);
-            tradeMonitorService.register(record);
-
-            log.info("Trade complete | tradeId={} TP={} SL={} artifactHash={}",
-                    tradeId,
-                    currentPrice * decision.getTakeProfitMultiplier(),
-                    currentPrice * decision.getStopLossMultiplier(),
-                    Numeric.toHexString(artifactHash).substring(0, 12) + "...");
+            // ── Execute Flow ─────────────────────────────
+            executeAutonomousTrade(decision, marketState);
 
         } catch (Exception e) {
-            log.error("Trade flow failed for signal {}: {}", signal, e.getMessage(), e);
+            log.error("Trade flow failed: {}", e.getMessage(), e);
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // HELPERS
-    // ─────────────────────────────────────────────────────────────────────
-
     /**
-     * Computes a slippage-protected minimum amount out.
-     *
-     * Slippage = max(0.5%, ATR% * 1.5) — widens automatically in volatile markets.
-     * Capped at 3% — never accept more than 3% slippage.
-     *
-     * FIX: V2 hardcoded BigInteger.ZERO which means the router accepts any amount
-     * out. This makes the "reward_risk_ratio" risk guard fail every single trade.
+     * ERC-8004 Step 3 Compliant Execution
      */
-    private BigInteger computeMinAmountOut(BigInteger amountIn, MarketState mkt) {
-        if (amountIn == null || amountIn.compareTo(BigInteger.ZERO) <= 0) {
-            return BigInteger.ZERO;
+    private void executeAutonomousTrade(AITradeDecision decision, MarketState mkt) throws Exception {
+        BigInteger agentId = identityService.getAgentId();
+        String tradeId = validationService.resolveTradeId(decision);
+        double currentPrice = mkt.getCurrentPrice().doubleValue();
+
+        // 1. Calculate Amount (Kelly Criterion)
+        BigInteger amountIn = riskService.calculateSafePositionSize(
+                decision.getConfidence(),
+                BigInteger.valueOf((long) riskService.getVaultBalanceUsdc()),
+                decision.getTakeProfitPct(),
+                decision.getStopLossPct()
+        );
+
+        if (amountIn.compareTo(BigInteger.ZERO) <= 0) {
+            log.warn("Kelly size 0. Aborting.");
+            return;
         }
-        double price   = mkt.getCurrentPrice() != null ? mkt.getCurrentPrice().doubleValue() : 0;
-        double atr     = mkt.getAtr();
-        double atrPct  = price > 0 ? atr / price : 0;
+
+        // 2. Slippage & Risk Packing (The "Step 3" Fix)
+        BigInteger minAmountOut = computeMinAmountOut(amountIn, mkt);
+        byte[] packedRisk = packRiskParams(decision); // Contract-readable bytes
+
+        // 3. Build & Sign Intent
+        TradeIntent intent = TradeIntent.builder()
+                .agentId(agentId)
+                .tokenIn(usdcAddress)
+                .tokenOut(wethAddress)
+                .amountIn(amountIn)
+                .minAmountOut(minAmountOut)
+                .deadline(BigInteger.valueOf(Instant.now().getEpochSecond() + 600))
+                .riskParams(packedRisk)
+                .build();
+
+        byte[] signature = eip712Signer.signTradeIntent(intent);
+
+        // 4. On-chain submission
+        var receipt = blockchainService.executeTrade(intent, signature);
+        String txHash = receipt.getTransactionHash();
+        Long blockNumber = receipt.getBlockNumber() != null ? receipt.getBlockNumber().longValue() : null;
+
+        //  Check if the transaction actually succeeded before tracking it as an open position
+        if (!receipt.isStatusOK()) {
+            log.error("Trade {} reverted on-chain. Posting failure artifact.", txHash);
+
+            // Post artifact: judges see the attempt, no register the artifact
+            validationService.postTradeArtifact(intent, null, decision, mkt, currentPrice, txHash, blockNumber);
+            return; // do not increment counters or monitor a failed trade.
+        }
+        // 5. Artifact & Monitoring
+        postTradeLogging(intent, decision, mkt, txHash, blockNumber);
+    }
+
+    private void postTradeLogging(TradeIntent intent, AITradeDecision decision, MarketState mkt, String txHash, Long blockNumber) throws Exception {
+        // Post Validation Artifact
+        validationService.postTradeArtifact(intent, null, decision, mkt, mkt.getCurrentPrice().doubleValue(), txHash, blockNumber);
+
+        // Register with Monitor
+        String tradeId = decision.hasTradeId() ? decision.getTradeId() : "intent_" + System.currentTimeMillis();
+        TradeRecord record = TradeRecord.fromDecision(tradeId, intent.getAgentId(), mkt.getCurrentPrice().doubleValue(), intent, decision);
+        record.setExecutionTxHash(txHash);
+        tradeMonitorService.register(record);
+
+        // Update Risk Counters
+        riskService.onPositionOpened();
+        riskService.incrementTradeCount();
+
+        log.info("Successfully executed trade {}. Tx: {}", tradeId, txHash);
+    }
+
+    private byte[] packRiskParams(AITradeDecision decision) {
+        // Packs SL (2 bytes), TP (2 bytes), Slippage (2 bytes) into 32-byte array
+        short slBps = (short) (decision.getStopLossPct() * 10000);
+        short tpBps = (short) (decision.getTakeProfitPct() * 10000);
+        short slipBps = 50; // 0.5% default
+
+        ByteBuffer buffer = ByteBuffer.allocate(32);
+        buffer.putShort(slBps);   // Bytes 0-1
+        buffer.putShort(tpBps);   // Bytes 2-3
+        buffer.putShort(slipBps); // Bytes 4-5
+        return buffer.array();
+    }
+
+    private BigInteger computeMinAmountOut(BigInteger amountIn, MarketState mkt) {
+        if (amountIn == null || amountIn.compareTo(BigInteger.ZERO) <= 0) return BigInteger.ZERO;
+        double price = mkt.getCurrentPrice().doubleValue();
+        double atrPct = price > 0 ? (mkt.getAtr() / price) : 0;
         double slippage = Math.min(0.03, Math.max(0.005, atrPct * 1.5));
+
         return new BigDecimal(amountIn)
                 .multiply(BigDecimal.valueOf(1.0 - slippage))
                 .toBigInteger();
     }
 
-    /**
-     * Computes a 32-byte keccak256 hash of the AI decision for the riskParams field.
-     *
-     * FIX: V2 used SHA-256 which produces a valid byte array but isn't
-     * Solidity-compatible. keccak256 matches what the router's verify() expects.
-     *
-     * The hash encodes action + confidence + regime + R:R so the router can
-     * verify the risk parameters haven't been tampered with between AI call and
-     * trade submission.
-     */
-    private byte[] computeRiskHash(AITradeDecision decision) {
-        String riskString = String.format("%s|%.4f|%s|%.3f|%.4f|%.4f",
-                decision.getAction(),
-                decision.getConfidence(),
-                decision.getMarketRegime(),
-                decision.getRewardRiskRatio(),
-                decision.getTakeProfitPct(),
-                decision.getStopLossPct());
-        // Hash.sha3 is web3j's keccak256 — matches Solidity keccak256()
-        return Hash.sha3(riskString.getBytes(StandardCharsets.UTF_8));
+    private byte[] computeReasoningHash(AnalysisRequest req, AITradeDecision dec) {
+        // Hash the market inputs + the AI's logic string
+        String uniqueContext = req.getMarket().toString() + dec.getReasoning();
+        return Hash.sha3(uniqueContext.getBytes(StandardCharsets.UTF_8));
     }
 }

@@ -30,6 +30,11 @@ dependencies {
     implementation 'org.web3j:core:4.12.0'
     implementation 'org.web3j:crypto:4.12.0'
 
+    // Explicitly add these for generated contract wrappers
+    implementation 'org.web3j:abi:4.12.0'
+    implementation 'org.web3j:contracts:4.12.0'
+    implementation 'org.web3j:utils:4.12.0'
+
     // HTTP client for calling Python AI service (RestTemplate is auto-configured)
     // No extra dependency needed if using Spring's RestTemplate
 

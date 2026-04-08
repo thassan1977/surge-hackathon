@@ -1,8 +1,11 @@
 package com.surge.agent.websocket;
 
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.surge.agent.services.market.MarketDataService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -60,6 +63,8 @@ public class BinanceWebSocketHandler extends TextWebSocketHandler {
 
     @Value("${ai.binance.stream.url}")
     private String WS_STREAM_URL;
+
+    private final ObjectReader streamReader = objectMapper.readerFor(BinanceStreamMessage.class);
 
     // ── Symbol mapping: Binance → internal ───────────────────────────────
     private static String normalizeSymbol(String binanceSymbol) {
@@ -152,43 +157,42 @@ public class BinanceWebSocketHandler extends TextWebSocketHandler {
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
         lastMessageMs.set(System.currentTimeMillis());
+        String payload = message.getPayload();
+
         try {
-//            log.info("RAW: {}", message.getPayload());
-            JsonNode rootNode = objectMapper.readTree(message.getPayload());
+            // 1. FAST: Direct mapping to DTO instead of building a full DOM tree
+            BinanceStreamMessage wrapper = streamReader.readValue(payload);
 
-            // 1. Unwrap Combined Stream Payload
-            // If it has a "data" node, we use that as our base. Otherwise, fallback to root.
-            JsonNode dataNode = rootNode.has("data") ? rootNode.get("data") : rootNode;
+            String stream = wrapper.stream();
+            JsonNode dataNode = wrapper.data();
 
-            // 2. Extract Event Type from the inner payload
-            String eventType = rootNode.path("stream").asText("");
+            // 2. Defensive check: If the message wasn't a combined stream,
+            // fallback to parsing the root (handles raw stream subscriptions)
+            if (stream == null || dataNode == null) {
+                dataNode = objectMapper.readTree(payload);
+                stream = dataNode.path("e").asText(""); // Binance often puts event type in 'e'
+            }
 
-            // 3. Route based on the unwrapped data
-            // Futures bookTicker usually has "e":"bookTicker", but we keep the fallback just in case
-            if (eventType.contains("@bookTicker")
-                    || (eventType.isEmpty() && dataNode.has("b") && dataNode.has("a"))) {
+            // 3. Routing
+            if (stream.contains("@bookTicker") || dataNode.has("b")) {
+                // Priority 1: L2 Best Bid/Ask
                 processBookTicker(dataNode);
-            } else if (eventType.contains("@aggTrade")) {
+            } else if (stream.contains("@aggTrade")) {
+                // Priority 2: Real-time Trades
                 processAggTrade(dataNode);
-            } else if (eventType.contains("@depth10")) {
-                String rawSymbol = eventType.split("@")[0].toUpperCase();
+            } else if (stream.contains("@depth10")) {
+                // Priority 3: Order Book Depth
+                String rawSymbol = stream.split("@")[0].toUpperCase();
                 String symbol = normalizeSymbol(rawSymbol);
                 processDepthUpdate(symbol, dataNode);
-//            } else if (eventType.contains("markPriceUpdate")) {
-//                double fundingRate = dataNode.path("r").asDouble(0.0);
-//                double openInterest = dataNode.path("oi").asDouble(0.0);
-//                marketDataService.processDerivativeData(fundingRate, openInterest, 0.0);
-
             } else {
-                // Good for catching unexpected pings or unknown streams
-                log.trace("Unhandled event type or payload: {}", message.getPayload());
+                log.trace("Unhandled stream: {} | Payload: {}", stream, payload);
             }
 
         } catch (Exception e) {
-            log.error("Message parsing error: {}. Payload: {}", e.getMessage(), message.getPayload());
+            log.error("Parsing error: {}. Payload: {}", e.getMessage(), payload);
         }
     }
-
     // ─────────────────────────────────────────────────────────────────────
     // Message processors
     // ─────────────────────────────────────────────────────────────────────

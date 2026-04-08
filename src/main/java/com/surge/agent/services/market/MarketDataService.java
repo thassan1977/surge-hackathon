@@ -115,6 +115,9 @@ public class MarketDataService {
     private volatile String      latestSymbol      = "ETH/USDC";
     private volatile long        lastWarmupLogMs   = 0;
 
+    private volatile double      livePrice;
+    private long                 lastCacheRefreshMs = 0;
+
     // ─────────────────────────────────────────────────────────────────────────
     // INIT
     // ─────────────────────────────────────────────────────────────────────────
@@ -147,35 +150,41 @@ public class MarketDataService {
     // LAYER 1: Order book tick (bookTicker)
     // ─────────────────────────────────────────────────────────────────────────
 
-    public synchronized void processNewTick(String symbol,
-                                            BigDecimal midPrice,
-                                            BigDecimal bidPrice,
-                                            BigDecimal askPrice,
-                                            BigDecimal bidQty,
-                                            BigDecimal askQty) {
+    public void processNewTick(String symbol,
+                               BigDecimal midPrice,
+                               BigDecimal bidPrice,
+                               BigDecimal askPrice,
+                               BigDecimal bidQty,
+                               BigDecimal askQty) {
+
+        // This allows getUnifiedState() to grab the real tick price
         this.latestPrice  = midPrice;
-        this.latestBid    = bidPrice;
-        this.latestAsk    = askPrice;
-        this.latestBidQty = bidQty;
-        this.latestAskQty = askQty;
         this.latestSymbol = symbol;
 
-        ZonedDateTime now = ZonedDateTime.now();
+        // Internal bar-closing and indicator logic needs protection.
+        synchronized (this) {
+            this.latestBid    = bidPrice;
+            this.latestAsk    = askPrice;
+            this.latestBidQty = bidQty;
+            this.latestAskQty = askQty;
 
-        if (currentBarEndTime == null) {
-            currentBarEndTime = now.plusSeconds(BAR_DURATION_SECONDS);
-            currentBarOpen    = midPrice;
-            currentBarHigh    = midPrice;
-            currentBarLow     = midPrice;
-        }
+            ZonedDateTime now = ZonedDateTime.now();
 
-        // Expand H/L with every tick
-        if (midPrice.compareTo(currentBarHigh) > 0) currentBarHigh = midPrice;
-        if (midPrice.compareTo(currentBarLow)  < 0) currentBarLow  = midPrice;
+            if (currentBarEndTime == null) {
+                currentBarEndTime = now.plusSeconds(BAR_DURATION_SECONDS);
+                currentBarOpen    = midPrice;
+                currentBarHigh    = midPrice;
+                currentBarLow     = midPrice;
+            }
 
-        // Close bar when time elapses
-        if (now.isAfter(currentBarEndTime)) {
-            closeCurrentBar(midPrice, bidQty.add(askQty));
+            // Expand H/L with every tick
+            if (midPrice.compareTo(currentBarHigh) > 0) currentBarHigh = midPrice;
+            if (midPrice.compareTo(currentBarLow)  < 0) currentBarLow  = midPrice;
+
+            // Close bar when time elapses
+            if (now.isAfter(currentBarEndTime)) {
+                closeCurrentBar(midPrice, bidQty.add(askQty));
+            }
         }
 
         refreshCache(symbol);
@@ -222,29 +231,32 @@ public class MarketDataService {
                                           BigDecimal price,
                                           BigDecimal qty,
                                           boolean isBuyerMaker) {
-        double amount = qty.doubleValue();
-        double priceD = price.doubleValue();
-        double qtyD   = qty.doubleValue();
+        this.latestPrice = price;
+        synchronized (this) {
+            double amount = qty.doubleValue();
+            double priceD = price.doubleValue();
+            double qtyD = qty.doubleValue();
 
-        // Real trade volume (not bookTicker quantity)
-        currentBarTradeVolume += amount;
+            // Real trade volume (not bookTicker quantity)
+            currentBarTradeVolume += amount;
 
-        // Volume delta: isBuyerMaker=true → taker is SELL (bearish), false → taker is BUY
-        if (!isBuyerMaker) {
-            currentPeriodVolumeDelta += amount;
-            cumulativeVolumeDelta    += amount;
-        } else {
-            currentPeriodVolumeDelta -= amount;
-            cumulativeVolumeDelta    -= amount;
+            // Volume delta: isBuyerMaker=true → taker is SELL (bearish), false → taker is BUY
+            if (!isBuyerMaker) {
+                currentPeriodVolumeDelta += amount;
+                cumulativeVolumeDelta += amount;
+            } else {
+                currentPeriodVolumeDelta -= amount;
+                cumulativeVolumeDelta -= amount;
+            }
+
+            // Expand intrabar H/L with actual fills
+            if (price.compareTo(currentBarHigh) > 0) currentBarHigh = price;
+            if (price.compareTo(currentBarLow) < 0) currentBarLow = price;
+
+            // VWAP accumulation
+            currentBarVwapNumerator += priceD * qtyD;
+            currentBarVwapVolume += qtyD;
         }
-
-        // Expand intrabar H/L with actual fills
-        if (price.compareTo(currentBarHigh) > 0) currentBarHigh = price;
-        if (price.compareTo(currentBarLow)  < 0) currentBarLow  = price;
-
-        // VWAP accumulation
-        currentBarVwapNumerator += priceD * qtyD;
-        currentBarVwapVolume    += qtyD;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -313,21 +325,22 @@ public class MarketDataService {
             return null;
         }
 
-        double price = latestPrice.doubleValue();
+        // ── THE TICK PRICE ──
+        // Use the volatile/atomic latestPrice immediately.
+        double tickPrice = latestPrice.doubleValue();
         MarketState state = new MarketState();
 
         // ── Identity ──────────────────────────────────────────────────────────
         state.setSymbol(symbol);
-        state.setCurrentPrice(latestPrice);
+        state.setCurrentPrice(latestPrice); // This is the live tick
         state.setBarCount(barCount);
 
         // ── L2 Order Book ─────────────────────────────────────────────────────
         state.setBids(latestBids);
         state.setAsks(latestAsks);
         state.setVwap(currentBarVwapVolume > 0
-                ? currentBarVwapNumerator / currentBarVwapVolume : price);
+                ? currentBarVwapNumerator / currentBarVwapVolume : tickPrice);
 
-        // Real bid-ask spread in dollars from L2
         if (!latestBids.isEmpty() && !latestAsks.isEmpty()
                 && latestBids.get(0).size() >= 2 && latestAsks.get(0).size() >= 2) {
             state.setBidAskSpreadDollars(latestAsks.get(0).get(0) - latestBids.get(0).get(0));
@@ -359,7 +372,8 @@ public class MarketDataService {
         // ── RSI ───────────────────────────────────────────────────────────────
         double rsi = rsiIndicator.getValue(lastIndex).doubleValue();
         state.setRsi(rsi);
-        state.setRsiDivergence(detectRsiDivergence(lastIndex, rsi, price));
+        // INSTANT FIX: Use tickPrice for divergence detection
+        state.setRsiDivergence(detectRsiDivergence(lastIndex, rsi, tickPrice));
 
         // ── Volatility + ATR ──────────────────────────────────────────────────
         double volSd = sdIndicator.getValue(lastIndex).doubleValue();
@@ -377,9 +391,9 @@ public class MarketDataService {
         // ── EMA50 ─────────────────────────────────────────────────────────────
         double ema50 = ema50Indicator.getValue(lastIndex).doubleValue();
         state.setEma50(ema50);
-        state.setDistanceToEma50(ema50 > 0 ? (price - ema50) / ema50 * 100.0 : 0.0);
+        // INSTANT FIX: Distance is relative to LIVE TICK, not old bar close
+        state.setDistanceToEma50(ema50 > 0 ? (tickPrice - ema50) / ema50 * 100.0 : 0.0);
 
-        // EMA50 slope (% change over 3 bars)
         if (lastIndex >= 3) {
             double ema50prev = ema50Indicator.getValue(lastIndex - 3).doubleValue();
             state.setEma50Slope(ema50prev > 0 ? (ema50 - ema50prev) / ema50prev * 100.0 : 0.0);
@@ -389,25 +403,19 @@ public class MarketDataService {
         if (isEma100Ready()) {
             double ema100 = ema100Indicator.getValue(lastIndex).doubleValue();
             state.setEma100(ema100);
-            state.setDistanceToEma100(ema100 > 0 ? (price - ema100) / ema100 * 100.0 : 0.0);
+            // INSTANT FIX: Use tickPrice
+            state.setDistanceToEma100(ema100 > 0 ? (tickPrice - ema100) / ema100 * 100.0 : 0.0);
 
             if (lastIndex >= 3) {
                 double ema100prev = ema100Indicator.getValue(lastIndex - 3).doubleValue();
-                state.setEma100Slope(ema100prev > 0
-                        ? (ema100 - ema100prev) / ema100prev * 100.0 : 0.0);
+                state.setEma100Slope(ema100prev > 0 ? (ema100 - ema100prev) / ema100prev * 100.0 : 0.0);
 
-                // EMA50/EMA100 cross detection (look back 1 bar)
                 double ema50prev1  = ema50Indicator.getValue(lastIndex - 1).doubleValue();
                 double ema100prev1 = ema100Indicator.getValue(lastIndex - 1).doubleValue();
                 boolean ema50aboveNow  = ema50 >= ema100;
                 boolean ema50abovePrev = ema50prev1 >= ema100prev1;
-                state.setGoldenCross(!ema50abovePrev && ema50aboveNow);  // crossed above
-                state.setDeathCross(ema50abovePrev && !ema50aboveNow);   // crossed below
-
-                if (state.isGoldenCross())
-                    log.info("🟡 GOLDEN CROSS: EMA50 crossed above EMA100 at ${}", latestPrice);
-                if (state.isDeathCross())
-                    log.info("💀 DEATH CROSS: EMA50 crossed below EMA100 at ${}", latestPrice);
+                state.setGoldenCross(!ema50abovePrev && ema50aboveNow);
+                state.setDeathCross(ema50abovePrev && !ema50aboveNow);
             }
         }
 
@@ -415,39 +423,32 @@ public class MarketDataService {
         if (isEma200Ready()) {
             double ema200 = ema200Indicator.getValue(lastIndex).doubleValue();
             state.setEma200(ema200);
-            state.setDistanceToEma200(ema200 > 0 ? (price - ema200) / ema200 * 100.0 : 0.0);
+            // INSTANT FIX: Use tickPrice
+            state.setDistanceToEma200(ema200 > 0 ? (tickPrice - ema200) / ema200 * 100.0 : 0.0);
 
             if (lastIndex >= 3) {
                 double ema200prev = ema200Indicator.getValue(lastIndex - 3).doubleValue();
-                state.setEma200Slope(ema200prev > 0
-                        ? (ema200 - ema200prev) / ema200prev * 100.0 : 0.0);
+                state.setEma200Slope(ema200prev > 0 ? (ema200 - ema200prev) / ema200prev * 100.0 : 0.0);
             }
         }
 
-        // ── MACD(12, 26, 9) ───────────────────────────────────────────────────
+        // ── MACD ──────────────────────────────────────────────────────────────
         if (isMacdReady()) {
             double macdVal    = macdIndicator.getValue(lastIndex).doubleValue();
             double macdSig    = macdSignalIndicator.getValue(lastIndex).doubleValue();
-            double macdHist   = macdVal - macdSig;
             state.setMacd(macdVal);
             state.setMacdSignal(macdSig);
-            state.setMacdHistogram(macdHist);
+            state.setMacdHistogram(macdVal - macdSig);
 
-            // Crossover: compare to previous bar
             if (lastIndex >= 1) {
                 double prevMacd = macdIndicator.getValue(lastIndex - 1).doubleValue();
                 double prevSig  = macdSignalIndicator.getValue(lastIndex - 1).doubleValue();
                 state.setMacdBullishCross(prevMacd < prevSig && macdVal >= macdSig);
                 state.setMacdBearishCross(prevMacd > prevSig && macdVal <= macdSig);
-
-                if (state.isMacdBullishCross())
-                    log.info("📈 MACD Bullish Cross at ${}", latestPrice);
-                if (state.isMacdBearishCross())
-                    log.info("📉 MACD Bearish Cross at ${}", latestPrice);
             }
         }
 
-        // ── Bollinger Bands (20, 2σ) ─────────────────────────────────────────
+        // ── Bollinger Bands ──────────────────────────────────────────────────
         if (isBollingerReady()) {
             double upper  = bbUpper.getValue(lastIndex).doubleValue();
             double lower  = bbLower.getValue(lastIndex).doubleValue();
@@ -456,18 +457,16 @@ public class MarketDataService {
             state.setBbLower(lower);
             state.setBbWidth(width);
 
-            // Band touch flags
-            state.setBbUpperTouch(price >= upper * 0.9995);
-            state.setBbLowerTouch(price <= lower * 1.0005);
+            // INSTANT FIX: Touches are checked against the LIVE TICK, not the old close.
+            state.setBbUpperTouch(tickPrice >= upper * 0.9995);
+            state.setBbLowerTouch(tickPrice <= lower * 1.0005);
 
-            // Squeeze: current width < 70% of 20-bar average width
             if (lastIndex >= 20) {
                 double sumWidth = 0.0;
                 for (int i = lastIndex - 20; i <= lastIndex; i++) {
                     sumWidth += bbWidth.getValue(i).doubleValue();
                 }
-                double avgWidth = sumWidth / 21.0;
-                state.setBbSqueeze(width < avgWidth * 0.7);
+                state.setBbSqueeze(width < (sumWidth / 21.0) * 0.7);
 
                 if (state.isBbSqueeze())
                     log.debug("BB Squeeze detected — low volatility, breakout likely");
@@ -493,14 +492,22 @@ public class MarketDataService {
     // ─────────────────────────────────────────────────────────────────────────
 
     private void refreshCache(String symbol) {
+        long now = System.currentTimeMillis();
+        // Only recalculate indicators every 100ms, not on every tick.
+        if (now - lastCacheRefreshMs < 100) {
+            return;
+        }
+
         try {
             MarketState fresh = getUnifiedState(symbol);
-            if (fresh != null) this.latestMarketState = fresh;
+            if (fresh != null) {
+                this.latestMarketState = fresh;
+                this.lastCacheRefreshMs = now;
+            }
         } catch (Exception e) {
             log.trace("Cache refresh skipped: {}", e.getMessage());
         }
     }
-
     private void logWarmup(int barCount) {
         long nowMs = System.currentTimeMillis();
         if (nowMs - lastWarmupLogMs < WARMUP_LOG_INTERVAL_MS) return;

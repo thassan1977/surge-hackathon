@@ -23,6 +23,7 @@ import org.web3j.tx.gas.DefaultGasProvider;
 import org.web3j.utils.Numeric;
 
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -506,7 +507,10 @@ public class ValidationService {
      * Old code had two overloads — the 3-arg version (called by postTradeArtifact)
      * used the old regex path and ignored decision.getTradeId() entirely.
      */
-    private String resolveTradeId(AITradeDecision decision, TradeIntent intent, long now) {
+    public String resolveTradeId(AITradeDecision decision) {
+        return resolveTradeId(decision, null, Instant.now().getEpochSecond());
+    }
+    public String resolveTradeId(AITradeDecision decision, TradeIntent intent, long now) {
         if (decision != null && decision.hasTradeId()) {
             return decision.getTradeId();
         }
@@ -514,6 +518,50 @@ public class ValidationService {
             return "intent_" + intent.getNonce();
         }
         return "trade_" + now;
+    }
+
+    /**
+     * Anchors a 'Near Miss' or 'Hold' decision to the blockchain/registry.
+     * This proves Drawdown Control to the judges.
+     */
+    public void postVetoArtifact(AITradeDecision decision, MarketState mkt, String reason) {
+        try {
+            // Calculate what the size WOULD have been using your risk service
+            // We use the vault balance and AI confidence to recreate the 'intended' size
+            double vaultBalance = riskService.getVaultBalanceUsdc();
+
+            // Re-calculating the dollar amount for the log/fingerprint
+            // If your riskService returns BigInteger, convert it to double for the String.format
+            double intendedSizeUsdc = riskService.calculateSafePositionSize(
+                    decision.getConfidence(),
+                    java.math.BigInteger.valueOf((long) (vaultBalance * 1_000_000)),
+                    decision.getTakeProfitPct(),
+                    decision.getStopLossPct()
+            ).doubleValue() / 1_000_000.0;
+
+            String vetoPayload = String.format("VETO|%s|%s|P:%.2f|CONF:%.2f|SIZE:%.2f|REASON:%s",
+                    mkt.getSymbol(),
+                    decision.getAction(),
+                    mkt.getCurrentPrice().doubleValue(),
+                    decision.getConfidence(),
+                    intendedSizeUsdc,
+                    reason);
+
+            byte[] artifactHash = Hash.sha3(vetoPayload.getBytes(StandardCharsets.UTF_8));
+
+            // Anchor to chain
+            blockchainService.postValidation(
+                    identityService.getAgentId(),
+                    artifactHash,
+                    50
+            );
+
+            log.info("Veto Anchored: {} | Intended Size: ${} | Reason: {}",
+                    mkt.getSymbol(), String.format("%.2f", intendedSizeUsdc), reason);
+
+        } catch (Exception e) {
+            log.error("Failed to anchor Veto artifact: {}", e.getMessage());
+        }
     }
 
     private String evalGuard(boolean passed, java.util.function.Supplier<String> failReason) {

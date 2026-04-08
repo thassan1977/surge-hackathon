@@ -30,26 +30,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
 /**
- * AutonomousTradingOrchestrator — V3 production grade.
- *
- * Fixed vs provided version:
- *   FIX 1  — Null check on marketState was AFTER fields were written to it (NPE)
- *   FIX 2  — processStandardExit() called executeTrade() which no longer exists
- *   FIX 3  — processStandardExit() used hardcoded getErc20Balance() = 1000L
- *   FIX 4  — processStandardExit() had minAmountOut = ZERO (infinite slippage)
- *   FIX 5  — processStandardExit() had no ValidationService call (zero artifacts)
- *   FIX 6  — processStandardExit() had no TradeMonitorService.register() call
- *   FIX 7  — buildIntentFromDecision() set agentId = BigInteger.ONE
- *   FIX 8  — calculateMinOut() math: USDC × ETH_price gives wrong units entirely
- *   FIX 9  — riskParams always new byte[32] (no integrity, router can't verify)
- *   FIX 10 — AnalysisRequest passed hardcoded 0.0, 0 for drawdown and positions
- *   FIX 11 — Double setRollingSentimentScore() call
- *   FIX 12 — No ValidationService.postTradeArtifact() on BUY path
- *   FIX 13 — No TradeMonitorService.register() on BUY — TP/SL never started
- *   FIX 14 — No riskService.onPositionOpened/Closed() — position count always 0
- *   FIX 15 — shouldTriggerAnalysis() never used PRICE_THRESHOLD or TIME_THRESHOLD
- *   FIX 16 — No @PostConstruct registration check — failures were silent
- */
+ * AutonomousTradingOrchestrator — V4.
+ **/
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -207,8 +189,11 @@ public class AutonomousTradingOrchestrator {
         }
 
         // FIX 8: slippage on WETH output, not on USDC input
-        BigInteger expectedWei = BigDecimal.valueOf(amountIn.doubleValue() / 1e6 / currentPrice * 1e18)
-                .setScale(0, RoundingMode.HALF_DOWN).toBigInteger();
+        BigDecimal usdcAmount   = new BigDecimal(amountIn).movePointLeft(6);   // e.g. 20.000000 USDC
+        BigDecimal ethAmount    = usdcAmount.divide(BigDecimal.valueOf(currentPrice), 18, RoundingMode.HALF_DOWN);
+        BigInteger expectedWei  = ethAmount.movePointRight(18).setScale(0, RoundingMode.HALF_DOWN).toBigInteger();
+//        BigInteger expectedWei = BigDecimal.valueOf(amountIn.doubleValue() / 1e6 / currentPrice * 1e18)
+//                .setScale(0, RoundingMode.HALF_DOWN).toBigInteger();
         BigInteger minAmountOut = computeMinAmountOut(expectedWei, marketState.getAtr(), currentPrice);
 
         TradeIntent intent = TradeIntent.builder()
@@ -219,7 +204,7 @@ public class AutonomousTradingOrchestrator {
                 .minAmountOut(minAmountOut)
                 .nonce(BigInteger.valueOf(System.currentTimeMillis()))
                 .deadline(BigInteger.valueOf(Instant.now().getEpochSecond() + 600))
-                .riskParams(computeRiskHash(decision))  // FIX 9
+                .riskParams(computeAuditHash(decision, marketState))
                 .build();
 
         byte[] signature = eip712Signer.signTradeIntent(intent);
@@ -270,8 +255,11 @@ public class AutonomousTradingOrchestrator {
         }
 
         // FIX 4: slippage on USDC output
-        BigInteger expectedUsdc = BigDecimal.valueOf(wethBalance.doubleValue() / 1e18 * currentPrice * 1e6)
-                .setScale(0, RoundingMode.HALF_DOWN).toBigInteger();
+        BigDecimal ethAmount    = new BigDecimal(wethBalance).movePointLeft(18);   // wei → ETH
+        BigDecimal usdcRaw      = ethAmount.multiply(BigDecimal.valueOf(currentPrice)).movePointRight(6);
+        BigInteger expectedUsdc = usdcRaw.setScale(0, RoundingMode.HALF_DOWN).toBigInteger();
+//        BigInteger expectedUsdc = BigDecimal.valueOf(wethBalance.doubleValue() / 1e18 * currentPrice * 1e6)
+//                .setScale(0, RoundingMode.HALF_DOWN).toBigInteger();
         BigInteger minAmountOut = computeMinAmountOut(expectedUsdc, marketState.getAtr(), currentPrice);
 
         TradeIntent intent = TradeIntent.builder()
@@ -282,7 +270,7 @@ public class AutonomousTradingOrchestrator {
                 .minAmountOut(minAmountOut)
                 .nonce(BigInteger.valueOf(System.currentTimeMillis()))
                 .deadline(BigInteger.valueOf(Instant.now().getEpochSecond() + 600))
-                .riskParams(computeRiskHash(decision))  // FIX 9
+                .riskParams(computeAuditHash(decision, marketState))  // FIX 9
                 .build();
         // Inside executeSell, after building the TradeIntent
         log.info("SELL TRADE DETAILS: agentId={}, wethBalance={}, price={}", agentId, wethBalance, currentPrice);
@@ -292,25 +280,24 @@ public class AutonomousTradingOrchestrator {
 
         byte[] signature = eip712Signer.signTradeIntent(intent);
 
-        // FIX 5: validation artifact for SELL
+        // validation artifact for SELL
         validationService.postTradeArtifact(
                 intent, null, decision, marketState, currentPrice, null, null);
 
-        // FIX 2: real execution, not missing stub
+        // real execution, not missing stub
         TransactionReceipt receipt = blockchainService.executeTrade(intent, signature);
         String txHash = receipt.getTransactionHash();
 
         BigInteger actualUsdcOut = parseAmountOutFromReceipt(receipt, wethBalance);
         recordVaultTrade(agentId, wethBalance, actualUsdcOut);
 
-        // FIX 6: register sell trade for monitoring
+        // register sell trade for monitoring
         String tradeId = decision.hasTradeId() ? decision.getTradeId() : "sell_" + intent.getNonce();
         TradeRecord record = TradeRecord.fromDecision(
                 tradeId, agentId, currentPrice, actualUsdcOut.doubleValue() / 1_000_000.0, intent, decision);
         record.setExecutionTxHash(txHash);
         tradeMonitorService.register(record);
 
-        // FIX 14
         riskService.onPositionClosed();
         performanceTracker.incrementSells();
         riskService.incrementTradeCount();
@@ -360,12 +347,20 @@ public class AutonomousTradingOrchestrator {
                 .toBigInteger();
     }
 
-    // FIX 9: keccak256 riskHash
-    private byte[] computeRiskHash(AITradeDecision decision) {
-        String s = String.format("%s|%.4f|%s|%.6f|%.6f",
-                decision.getAction(), decision.getConfidence(),
-                decision.getMarketRegime(), decision.getTakeProfitPct(), decision.getStopLossPct());
-        return Hash.sha3(s.getBytes(StandardCharsets.UTF_8));
+    private byte[] computeAuditHash(AITradeDecision decision, MarketState market) {
+        // Include (Market Context) + (Decision)
+        String auditString = String.format(
+                "CTX:%s|P:%.2f|RSI:%.2f|ATR:%.4f|DEC:%s|CONF:%.2f",
+                market.getSymbol(),
+                market.getCurrentPrice().doubleValue(),
+                market.getRsi(),
+                market.getAtr(),
+                decision.getAction(),
+                decision.getConfidence()
+        );
+
+        // This hash is now a "Fingerprint" of that exact microsecond in the market
+        return Hash.sha3(auditString.getBytes(StandardCharsets.UTF_8));
     }
 
     // Parses Transfer event amountOut. Never returns zero to prevent MockVault underflow.

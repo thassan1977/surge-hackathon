@@ -52,20 +52,47 @@ public class NewsAggregator {
     public double getGlobalSentiment() {
         if (history.isEmpty()) return 0.0;
 
-        return history.stream()
-                .limit(20) // Only look at the most recent 20 headlines
-                .mapToDouble(this::calculateArticleScore)
-                .average()
-                .orElse(0.0);
+        long now = System.currentTimeMillis();
+        double weightedSum = 0;
+        double totalWeight = 0;
+
+        // Use a copy to prevent ConcurrentModificationException
+        List<NewsArticle> snapshot = new ArrayList<>(history).stream().limit(20).toList();
+
+        for (NewsArticle article : snapshot) {
+            double rawScore = calculateArticleScore(article);
+
+            // Age Decay: Linear decay over 2 hours (7200000 ms)
+            long ageMs = now - article.timestamp();
+            double ageWeight = Math.max(0, 1.0 - (ageMs / 7200000.0));
+
+            // Source Weight (Example: Trust certain sources more)
+            double sourceWeight = article.source().equalsIgnoreCase("Reuters") ? 1.5 : 1.0;
+
+            weightedSum += (rawScore * ageWeight * sourceWeight);
+            totalWeight += (ageWeight * sourceWeight);
+        }
+
+        return totalWeight > 0 ? weightedSum / totalWeight : 0.0;
     }
 
     /**
      * Requirement for MarketDataService: Detects if there's a spike in 'Panic' votes
+     * Requires multiple articles to confirm panic, or one extreme outlier.
      */
     public boolean isPanicPresent() {
-        return history.stream()
-                .limit(10)
-                .anyMatch(a -> a.panicVotes() >= PANIC_THRESHOLD);
+        List<NewsArticle> recent = new ArrayList<>(history).stream().limit(10).toList();
+
+        long articlesWithPanic = recent.stream()
+                .filter(a -> a.panicVotes() >= 3) // Lower threshold per article...
+                .count();
+
+        int totalPanicVotes = recent.stream().mapToInt(NewsArticle::panicVotes).sum();
+
+        // Panic is TRUE if:
+        // 1. More than 30% of recent news carries panic votes OR
+        // 2. The total vote count is extremely high (Consensus)
+        return articlesWithPanic >= 3 || totalPanicVotes >= 15;
     }
 
     /**
