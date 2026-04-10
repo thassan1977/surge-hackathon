@@ -24264,3 +24264,36 @@ Action: HOLD | Confidence: 0.0% | Status: RISK_
 2026-04-10T15:23:42.330+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Confidence 0.0 < 0.72 floor — skipping.
 2026-04-10T15:23:52.282+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Wallet ETH: 2.146281 | USD value: $4754.24 | ETH price: $2215.105
 2026-04-10T15:23:52.283+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Equity Refresh: $4754.24 (ETH price: $2215.105)
+2026-04-10T15:24:02.301+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Wallet ETH: 2.146281 | USD value: $4754.00 | ETH price: $2214.995
+2026-04-10T15:24:02.301+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Equity Refresh: $4754.00 (ETH price: $2214.995)
+2026-04-10T15:24:02.301+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Analyzing | Price=2214.99500000 ATR=0.5659104614540809 FearGreed=16 Trend=STABLE OBI=0.027170455295036373
+2026-04-10T15:24:02.308+04:00  INFO 49847 --- [scheduling-1] c.surge.agent.services.PythonAIClient    : AI decision: action=HOLD confidence=0.00 regime=RANGING tradeId=none
+2026-04-10T15:24:02.308+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : AI: action=HOLD confidence=0.0 regime=RANGING tradeId=pending | ### EXECUTION VETO: EXECUTION_VETO ###
+Context: Market impact would exceed edge in BULL_TREND. Second level spreads: bid 2214.98, ask 2215.01.
+Regime: BULL_TREND | Logic: Liquidity composite 0.15 < 0.22
+Action: HOLD | Confidence: 0.0% | Status: RISK_
+2026-04-10T15:24:02.308+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Confidence 0.0 < 0.72 floor — skipping.
+2026-04-10T15:24:03.116+04:00  INFO 49847 --- [scheduling-1] c.surge.agent.services.news.NewsService  : CryptoCompare news: 10 added, 0 skipped (non-ETH). Total: 100 | Panic ratio: 12.0%
+2026-04-10T15:24:12.470+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Wallet ETH: 2.146281 | USD value: $4754.24 | ETH price: $2215.105
+2026-04-10T15:24:12.470+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Equity Refresh: $4754.24 (ETH price: $2215.105)
+2026-04-10T15:24:12.470+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Analyzing | Price=2215.10500000 ATR=0.5469168570645037 FearGreed=16 Trend=STABLE OBI=-0.2138323001366837
+2026-04-10T15:24:12.473+04:00  INFO 49847 --- [scheduling-1] c.surge.agent.services.PythonAIClient    : AI decision: action=HOLD confidence=0.00 regime=RANGING tradeId=none
+2026-04-10T15:24:12.473+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : AI: action=HOLD confidence=0.0 regime=RANGING tradeId=pending | ### EXECUTION VETO: EXECUTION_VETO ###
+Context: Market impact would exceed edge in BULL_TREND. Second level spreads: bid 2215.09, ask 2215.14.
+Regime: BULL_TREND | Logic: Liquidity composite 0.15 < 0.22
+Action: HOLD | Confidence: 0.0% | Status: RISK_
+2026-04-10T15:24:12.473+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Confidence 0.0 < 0.72 floor — skipping.
+2026-04-10T15:24:22.275+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Wallet ETH: 2.146281 | USD value: $4753.21 | ETH price: $2214.625
+2026-04-10T15:24:22.276+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Equity Refresh: $4753.21 (ETH price: $2214.625)
+2026-04-10T15:24:32.364+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Wallet ETH: 2.146281 | USD value: $4752.97 | ETH price: $2214.515
+2026-04-10T15:24:32.364+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Equity Refresh: $4752.97 (ETH price: $2214.515)
+2026-04-10T15:24:32.364+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Analyzing | Price=2214.51500000 ATR=0.5188466777750057 FearGreed=16 Trend=STABLE OBI=-0.243994035455901
+2026-04-10T15:24:32.372+04:00  INFO 49847 --- [scheduling-1] c.surge.agent.services.PythonAIClient    : AI decision: action=HOLD confidence=0.00 regime=RANGING tradeId=none
+2026-04-10T15:24:32.372+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : AI: action=HOLD confidence=0.0 regime=RANGING tradeId=pending | ### EXECUTION VETO: EXECUTION_VETO ###
+Context: Market impact would exceed edge in BULL_TREND. Second level spreads: bid 2214.50, ask 2214.53.
+Regime: BULL_TREND | Logic: Liquidity composite 0.15 < 0.22
+Action: HOLD | Confidence: 0.0% | Status: RISK_
+2026-04-10T15:24:32.372+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Confidence 0.0 < 0.72 floor — skipping.
+2026-04-10T15:24:42.563+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Wallet ETH: 2.146281 | USD value: $4753.50 | ETH price: $2214.76
+2026-04-10T15:24:42.564+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Equity Refresh: $4753.50 (ETH price: $2214.76)
+2026-04-10T15:24:42.564+04:00  INFO 49847 --- [scheduling-1] c.s.a.s.AutonomousTradingOrchestrator    : Analyzing | Price=2214.76000000 ATR=0.5200004865053625 FearGreed=16 Trend=STABLE OBI=0.635876862905308
