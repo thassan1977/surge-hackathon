@@ -56,7 +56,7 @@ public class RiskManagementService {
 
     // ── Constants ─────────────────────────────────────────────────────────
     private static final double     MIN_CONFIDENCE      = 0.60;
-    private static final int        MAX_TRADES_PER_DAY  = 10;
+    private static final int        MAX_TRADES_PER_DAY  = 1000;
     private static final double     MAX_WALLET_EXPOSURE = 0.05;
     private static final BigDecimal MIN_TRADE_USDC      = new BigDecimal("10.0");
     private static final BigDecimal USDC_DECIMALS       = new BigDecimal("1000000");
@@ -246,10 +246,10 @@ public class RiskManagementService {
     /**
      * V3: Dynamic Kelly using AI-provided TP/SL as the b-ratio.
      */
-    public BigInteger calculateSafePositionSize(double confidence,
-                                                BigInteger totalUsdcBalance,
-                                                double takeProfitPct,
-                                                double stopLossPct) {
+    public BigInteger calculateSafePositionSizeUsd(double confidence,
+                                                   double balanceUsd,
+                                                   double takeProfitPct,
+                                                   double stopLossPct) {
         if (circuitBreakerTripped) return BigInteger.ZERO;
 
         double b         = stopLossPct > 0 ? takeProfitPct / stopLossPct : 2.0;
@@ -257,23 +257,23 @@ public class RiskManagementService {
         double fStar     = (b * confidence - q) / b;
         double halfKelly = Math.max(0.0, fStar * 0.5);
         double finalLvg  = Math.min(halfKelly, MAX_WALLET_EXPOSURE);
-
         this.lastKellyFraction = finalLvg;
 
-        BigDecimal balance = new BigDecimal(totalUsdcBalance);
-        BigDecimal bet     = balance.multiply(BigDecimal.valueOf(finalLvg));
-        BigDecimal betUsdc = bet.divide(USDC_DECIMALS, RoundingMode.HALF_DOWN);
-
-        if (betUsdc.compareTo(MIN_TRADE_USDC) < 0) {
-            log.warn("Kelly size {} USDC below minimum — aborting.", betUsdc);
-            return BigInteger.ZERO;
+        double betUsd = balanceUsd * finalLvg;
+        double minimumTrade = 6.0; // $6 USD
+        if (betUsd < minimumTrade && balanceUsd > minimumTrade ) {
+            log.info("Kelly suggested {}, but forcing to {} minimum for execution.", betUsd, minimumTrade);
+            return BigInteger.valueOf((long)(minimumTrade * 100));
         }
-        return bet.toBigInteger();
+
+
+        // Return as USD*100 scaled for RiskRouter (e.g. $10.29 → 1029)
+        return BigInteger.valueOf((long)(betUsd * 100));
     }
 
     /** V2-compatible: uses hardcoded b=2.0 */
     public BigInteger calculateSafePositionSize(double confidence, BigInteger totalUsdcBalance) {
-        return calculateSafePositionSize(confidence, totalUsdcBalance, 0.02, 0.01);
+        return calculateSafePositionSizeUsd(confidence, totalUsdcBalance.doubleValue(), 0.02, 0.01);
     }
 
     public boolean isTradeSafe(AITradeDecision decision, double spread, int fearGreedIndex) {
@@ -314,7 +314,7 @@ public class RiskManagementService {
             log.warn("Risk Rejected: BUY in extreme greed ({}). Reversal likely.", fearGreedIndex);
             return false;
         }
-        if (TradeAction.SELL.equals(decision.getAction()) && fearGreedIndex < 20) {
+        if (TradeAction.SELL.equals(decision.getAction()) && fearGreedIndex < 5) {
             log.warn("Risk Rejected: SELL in extreme fear ({}). Reversal likely.", fearGreedIndex);
             return false;
         }

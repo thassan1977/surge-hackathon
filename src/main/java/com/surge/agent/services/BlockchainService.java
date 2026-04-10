@@ -1,23 +1,24 @@
 package com.surge.agent.services;
 
 import com.surge.agent.config.ContractConfig;
-import com.surge.agent.contracts.MockRiskRouter;
-import com.surge.agent.contracts.ValidationRegistry;
 import com.surge.agent.model.TradeIntent;
+import com.surge.agent.contracts.RiskRouter;
+import com.surge.agent.contracts.ValidationRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.web3j.crypto.Credentials;
+import org.web3j.crypto.Hash;
 import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.tx.gas.DefaultGasProvider;
-import org.web3j.utils.Numeric;
 
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedList;
 import java.util.List;
-import org.springframework.beans.factory.annotation.Value;
-
 
 @Slf4j
 @Service
@@ -28,142 +29,134 @@ public class BlockchainService {
     private final Credentials credentials;
     private final ContractConfig contractConfig;
     private final DefaultGasProvider gasProvider;
+    private final RiskRouter riskRouter;
+    private final IdentityService identityService;
 
     @Value("${blockchain.confirmations.required:1}")
     private int requiredConfirmations;
 
-    @Value("${blockchain.polling.interval.ms:2000}")
+    @Value("${blockchain.polling.interval.ms:3000}")
     private long pollingIntervalMs;
 
-    // Rolling PnL window for Sharpe computation
     private final LinkedList<Double> tradeReturns = new LinkedList<>();
     private static final int SHARPE_WINDOW = 30;
 
-    // ── Trade Execution (WITH CONFIRMATION WAITING) ──────────────────────
-
-    public TransactionReceipt executeTrade(TradeIntent intent, byte[] signature) throws Exception {
-        MockRiskRouter router = MockRiskRouter.load(
+    /**
+     * Submits a Trade Intent to the Live RiskRouter.
+     * Note: This environment uses "Shadow Trading" intents, not real token swaps.
+     */
+    public TransactionReceipt submitTradeIntent(TradeIntent intent, byte[] signature) throws Exception {
+        // 1. Load the REAL RiskRouter wrapper
+        RiskRouter router = RiskRouter.load(
                 contractConfig.getRouter(), web3j, credentials, gasProvider);
 
-        // Convert Java model to Solidity struct
-        MockRiskRouter.TradeIntent solIntent = new MockRiskRouter.TradeIntent(
+        // 2. Map Java model to the Solidity Struct expected by the Live ABI
+        RiskRouter.TradeIntent solIntent = new RiskRouter.TradeIntent(
                 intent.getAgentId(),
-                intent.getTokenIn(),
-                intent.getTokenOut(),
-                intent.getAmountIn(),
-                intent.getMinAmountOut(),
-                intent.getDeadline(),
-                Numeric.toBytesPadded(new BigInteger(1, intent.getRiskParams()), 32)
+                intent.getAgentWallet(),
+                intent.getPair(),
+                intent.getAction(),
+                intent.getAmountUsdScaled(),
+                intent.getMaxSlippageBps(),
+                intent.getNonce(),
+                intent.getDeadline()
         );
 
-        log.info("Broadcasting trade intent to network for Agent {}...", intent.getAgentId());
+        log.info("Broadcasting {} intent for {} to RiskRouter...", intent.getAction(), intent.getPair());
 
-        // 1. Send the transaction (this blocks until it is MINED into the first block)
-        TransactionReceipt receipt = router.executeTrade(solIntent, signature).send();
-        String txHash = receipt.getTransactionHash();
-        BigInteger txBlockNumber = receipt.getBlockNumber();
+        // 3. Submit to Blockchain
+        TransactionReceipt receipt = router.submitTradeIntent(solIntent, signature).send();
 
-        log.info("Trade mined: txHash={} block={}. Waiting for {} confirmations...",
-                txHash, txBlockNumber, requiredConfirmations);
-
-        // 2. Wait for N Confirmations (Re-org Protection)
-        waitForConfirmations(txHash, txBlockNumber);
-
-        // 3. Verify on-chain success status (0x1 = Success, 0x0 = Revert)
         if (!receipt.isStatusOK()) {
-            log.error("Transaction REVERTED on-chain! txHash={}", txHash);
-            throw new RuntimeException("Execution reverted on-chain: " + txHash);
+            throw new RuntimeException("TradeIntent submission REVERTED: " + receipt.getTransactionHash());
         }
 
-        // 4. Parse the TradeExecuted event to get amountOut for PnL
-        List<MockRiskRouter.TradeExecutedEventResponse> events =
-                router.getTradeExecutedEvents(receipt);
+        log.info("Intent mined. TX: {}. Waiting for confirmations...", receipt.getTransactionHash());
+        waitForConfirmations(receipt.getTransactionHash(), receipt.getBlockNumber());
 
+        // 4. Parse events (Look for TradeIntentSubmitted or TradeApproved)
+        List<RiskRouter.TradeIntentSubmittedEventResponse> events = router.getTradeIntentSubmittedEvents(receipt);
         if (!events.isEmpty()) {
-            MockRiskRouter.TradeExecutedEventResponse event = events.get(0);
-            double pnlRaw = event.amountOut.subtract(event.amountIn).doubleValue();
-            double pnlPct = event.amountIn.longValue() > 0
-                    ? pnlRaw / event.amountIn.doubleValue() : 0.0;
-            recordTradeReturn(pnlPct);
-            log.info("TradeExecuted: amountIn={} amountOut={} pnl={}",
-                    event.amountIn, event.amountOut, pnlPct);
-        } else {
-            log.warn("Trade mined successfully but no TradeExecuted event was emitted. txHash={}", txHash);
+            log.info("✅ Intent successfully registered on-chain for Agent {}", intent.getAgentId());
         }
 
         return receipt;
     }
 
     /**
-     * Polls the blockchain to ensure the transaction block is buried under
-     * a specific number of subsequent blocks to prevent re-org invalidation.
+     * Updated for live ValidationRegistry: postEIP712Attestation
      */
-    private void waitForConfirmations(String txHash, BigInteger txBlockNumber) throws Exception {
-        if (requiredConfirmations <= 0) return;
-
-        int currentConfirmations = 0;
-        int maxAttempts = 60; // Max polling time (e.g., 60 * 2s = 2 minutes)
-        int attempts = 0;
-
-        while (currentConfirmations < requiredConfirmations && attempts < maxAttempts) {
-            Thread.sleep(pollingIntervalMs);
-
-            BigInteger latestBlock = web3j.ethBlockNumber().send().getBlockNumber();
-            currentConfirmations = latestBlock.subtract(txBlockNumber).intValue();
-
-            attempts++;
-            if (attempts % 5 == 0) {
-                log.debug("Tx {} confirmations: {}/{}", txHash, Math.max(0, currentConfirmations), requiredConfirmations);
-            }
-        }
-
-        if (currentConfirmations < requiredConfirmations) {
-            log.warn("Timeout waiting for confirmations. Reached {}/{} for tx: {}",
-                    currentConfirmations, requiredConfirmations, txHash);
-        } else {
-            log.info("Transaction {} fully confirmed with {} block(s).", txHash, currentConfirmations);
-        }
-    }
-
-    // ── Validation & Utility Methods (Preserved) ──────────────────────────
-
-    public void postValidation(BigInteger agentId, byte[] artifactHash, int score) {
+    public void postValidation(BigInteger agentId, byte[] checkpointHash, int score, String reasoning) {
         try {
-            if (!isAuthorizedValidator(agentId)) {
-                log.warn("kipping postValidation: Address {} is NOT yet a registered validator for Agent {}",
-                        credentials.getAddress(), agentId);
-                return;
-            }
-
+            // 1. Load the NEWLY generated ValidationRegistry
             ValidationRegistry validation = ValidationRegistry.load(
                     contractConfig.getValidation(), web3j, credentials, gasProvider);
 
-            var receipt = validation.postValidation(agentId, artifactHash,
-                    BigInteger.valueOf(score)).send();
+            log.info("Posting attestation for Agent {} with score {}...", agentId, score);
 
-            log.info("Validation anchored: agentId={} score={} tx={}",
-                    agentId, score, receipt.getTransactionHash());
+            // 2. Call the EIP-712 method found in the hackathon ABI
+            // Parameters: uint256, bytes32, uint256, string
+            TransactionReceipt receipt = validation.postEIP712Attestation(
+                    agentId,
+                    checkpointHash,
+                    BigInteger.valueOf(score),
+                    reasoning
+            ).send();
+
+            // 3. getTransactionHash() is a standard method on TransactionReceipt
+            if (receipt.isStatusOK()) {
+                log.info("Attestation anchored successfully!");
+                log.info("Agent: {} | Score: {} | TX: {}",
+                        agentId, score, receipt.getTransactionHash());
+            } else {
+                log.error("Attestation transaction failed on-chain: {}", receipt.getTransactionHash());
+            }
+
         } catch (Exception e) {
-            log.error("Validation Error: {}", e.getMessage());
+            log.error("Attestation Error: {}", e.getMessage());
+            // If you get "Method not found", ensure your java-core was actually refreshed
         }
     }
 
+    private void waitForConfirmations(String txHash, BigInteger txBlockNumber) throws Exception {
+        if (requiredConfirmations <= 0) return;
+        int currentConfirmations = 0;
+        while (currentConfirmations < requiredConfirmations) {
+            Thread.sleep(pollingIntervalMs);
+            BigInteger latestBlock = web3j.ethBlockNumber().send().getBlockNumber();
+            currentConfirmations = latestBlock.subtract(txBlockNumber).intValue();
+        }
+        log.info("TX {} confirmed ({} blocks).", txHash, currentConfirmations);
+    }
+
+    // PnL and Sharpe methods remain for local tracking
     public void recordTradeReturn(double pnlPct) {
         tradeReturns.addLast(pnlPct);
         if (tradeReturns.size() > SHARPE_WINDOW) tradeReturns.removeFirst();
     }
 
-    public boolean isAuthorizedValidator(BigInteger agentId) {
-        if (agentId == null || agentId.equals(BigInteger.ZERO)) return false;
-        try {
-            ValidationRegistry validation = ValidationRegistry.load(
-                    contractConfig.getValidation(), web3j, credentials, gasProvider);
-            return validation.validators(agentId, credentials.getAddress()).send();
-        } catch (Exception e) {
-            log.error("Failed to verify validator status for agent {}: {}", agentId, e.getMessage());
-            return false;
-        }
+
+    public TransactionReceipt executeTrade(TradeIntent intent, byte[] signature) throws Exception {
+        log.info("Submitting Trade Intent for {} {}...", intent.getAction(), intent.getPair());
+
+        // 1. Map your internal TradeIntent to the Solidity-generated DynamicStruct
+        // The order must match your RiskRouter.TradeIntent constructor exactly
+        RiskRouter.TradeIntent solIntent = new RiskRouter.TradeIntent(
+                intent.getAgentId(),
+                identityService.getAgentWallet(), // Ensure this returns the String address
+                intent.getPair(),
+                intent.getAction(),
+                intent.getAmountUsdScaled(),
+                intent.getMaxSlippageBps(),
+                intent.getNonce(),
+                intent.getDeadline()
+        );
+
+        // 2. Call the correct method: submitTradeIntent
+        // Signature must be wrapped in DynamicBytes as per the generated code
+        return riskRouter.submitTradeIntent(solIntent, signature).send();
     }
+
 
     public double getSharpeRatio() {
         if (tradeReturns.size() < 5) return 0.0;
@@ -181,14 +174,24 @@ public class BlockchainService {
         return tradeReturns.stream().mapToDouble(x -> x).sum();
     }
 
-    public void resetDailyLossIfPossible(BigInteger agentId) {
-        try {
-            MockRiskRouter router = MockRiskRouter.load(
-                    contractConfig.getRouter(), web3j, credentials, gasProvider);
-            router.resetDailyLoss(agentId).send();
-            log.info("Daily loss reset for agent {}", agentId);
-        } catch (Exception e) {
-            log.warn("Failed to reset daily loss: {}", e.getMessage());
-        }
+//    public void resetDailyLossIfPossible(BigInteger agentId) {
+//        try {
+//            RiskRouter router = RiskRouter.load(
+//                    contractConfig.getRouter(), web3j, credentials, gasProvider);
+//            router.resetDailyLoss(agentId).send();
+//            log.info("Daily loss reset for agent {}", agentId);
+//        } catch (Exception e) {
+//            log.warn("Failed to reset daily loss: {}", e.getMessage());
+//        }
+//    }
+
+    public String ethCall(String contractAddress, String encodedFunction) throws Exception {
+        org.web3j.protocol.core.methods.request.Transaction transaction =
+                org.web3j.protocol.core.methods.request.Transaction.createEthCallTransaction(
+                        credentials.getAddress(), contractAddress, encodedFunction
+                );
+        return web3j.ethCall(transaction, DefaultBlockParameterName.LATEST)
+                .send().getValue();
     }
+
 }

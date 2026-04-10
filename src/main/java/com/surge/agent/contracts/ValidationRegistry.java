@@ -13,23 +13,24 @@ import org.web3j.abi.TypeReference;
 import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Bool;
 import org.web3j.abi.datatypes.DynamicArray;
+import org.web3j.abi.datatypes.DynamicBytes;
+import org.web3j.abi.datatypes.DynamicStruct;
 import org.web3j.abi.datatypes.Event;
 import org.web3j.abi.datatypes.Function;
-import org.web3j.abi.datatypes.StaticStruct;
 import org.web3j.abi.datatypes.Type;
+import org.web3j.abi.datatypes.Utf8String;
 import org.web3j.abi.datatypes.generated.Bytes32;
 import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.abi.datatypes.generated.Uint8;
 import org.web3j.crypto.Credentials;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
-import org.web3j.protocol.core.RemoteCall;
 import org.web3j.protocol.core.RemoteFunctionCall;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.BaseEventResponse;
 import org.web3j.protocol.core.methods.response.Log;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
-import org.web3j.tuples.generated.Tuple4;
+import org.web3j.tuples.generated.Tuple8;
 import org.web3j.tx.Contract;
 import org.web3j.tx.TransactionManager;
 import org.web3j.tx.gas.ContractGasProvider;
@@ -46,32 +47,46 @@ import org.web3j.tx.gas.ContractGasProvider;
 @SuppressWarnings("rawtypes")
 @Generated("org.web3j.codegen.SolidityFunctionWrapperGenerator")
 public class ValidationRegistry extends Contract {
-    public static final String BINARY = "608060405234801561001057600080fd5b50338061003757604051631e4fbdf760e01b81526000600482015260240160405180910390fd5b61004081610046565b50610096565b600080546001600160a01b038381166001600160a01b0319831681178455604051919092169283917f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09190a35050565b61069a806100a56000396000f3fe608060405234801561001057600080fd5b50600436106100885760003560e01c8063715018a61161005b578063715018a61461011c5780638da5cb5b1461012457806391b198741461013f578063f2fde38b1461017d57600080fd5b8063434dbaee1461008d5780634b561753146100b65780634b5a82d1146100cb5780635c5e6fcd14610109575b600080fd5b6100a061009b366004610510565b610190565b6040516100ad9190610529565b60405180910390f35b6100c96100c43660046105b5565b610230565b005b6100de6100d93660046105e1565b610268565b6040805194855260ff9093166020850152918301526001600160a01b031660608201526080016100ad565b6100c9610117366004610603565b6102ba565b6100c9610441565b6000546040516001600160a01b0390911681526020016100ad565b61016d61014d3660046105b5565b600260209081526000928352604080842090915290825290205460ff1681565b60405190151581526020016100ad565b6100c961018b366004610642565b610455565b606060016000838152602001908152602001600020805480602002602001604051908101604052809291908181526020016000905b8282101561022557600084815260209081902060408051608081018252600486029092018054835260018082015460ff1684860152600282015492840192909252600301546001600160a01b0316606083015290835290920191016101c5565b505050509050919050565b610238610493565b60009182526002602090815260408084206001600160a01b0390931684529190529020805460ff19166001179055565b6001602052816000526040600020818154811061028457600080fd5b6000918252602090912060049091020180546001820154600283015460039093015491945060ff1692506001600160a01b031684565b600083815260026020908152604080832033845290915290205460ff166103285760405162461bcd60e51b815260206004820152601e60248201527f4e6f7420612076616c696461746f7220666f722074686973206167656e74000060448201526064015b60405180910390fd5b60648160ff1611156103715760405162461bcd60e51b815260206004820152601260248201527153636f7265206f7574206f662072616e676560701b604482015260640161031f565b6000838152600160208181526040808420815160808101835287815260ff8781168286018181524284870190815233606086018181528754808c018955978c529a899020955160049097029095019586559051978501805460ff19169890931697909717909155945160028301559451600390910180546001600160a01b0319166001600160a01b0390921691909117905580518681529182019290925285917f1a6078c320bd4b9eb3bf5436c2a989b079716aed318bcef40ce6c8b41279d0e0910160405180910390a3505050565b610449610493565b61045360006104c0565b565b61045d610493565b6001600160a01b03811661048757604051631e4fbdf760e01b81526000600482015260240161031f565b610490816104c0565b50565b6000546001600160a01b031633146104535760405163118cdaa760e01b815233600482015260240161031f565b600080546001600160a01b038381166001600160a01b0319831681178455604051919092169283917f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e09190a35050565b60006020828403121561052257600080fd5b5035919050565b602080825282518282018190526000919060409081850190868401855b8281101561058c578151805185528681015160ff168786015285810151868601526060908101516001600160a01b03169085015260809093019290850190600101610546565b5091979650505050505050565b80356001600160a01b03811681146105b057600080fd5b919050565b600080604083850312156105c857600080fd5b823591506105d860208401610599565b90509250929050565b600080604083850312156105f457600080fd5b50508035926020909101359150565b60008060006060848603121561061857600080fd5b8335925060208401359150604084013560ff8116811461063757600080fd5b809150509250925092565b60006020828403121561065457600080fd5b61065d82610599565b939250505056fea2646970667358221220b9f5d85dc5bca7723076bbd2bbbd271c7c3271c5887b66924b9137dded1f8e9364736f6c63430008180033\n";
-
-    private static String librariesLinkedBinary;
+    public static final String BINARY = "Bin file was not provided";
 
     public static final String FUNC_ADDVALIDATOR = "addValidator";
 
-    public static final String FUNC_GETVALIDATIONS = "getValidations";
+    public static final String FUNC_AGENTREGISTRY = "agentRegistry";
+
+    public static final String FUNC_ATTESTATIONCOUNT = "attestationCount";
+
+    public static final String FUNC_CHECKPOINTATTESTATIONS = "checkpointAttestations";
+
+    public static final String FUNC_GETATTESTATION = "getAttestation";
+
+    public static final String FUNC_GETATTESTATIONS = "getAttestations";
+
+    public static final String FUNC_GETAVERAGEVALIDATIONSCORE = "getAverageValidationScore";
+
+    public static final String FUNC_OPENVALIDATION = "openValidation";
 
     public static final String FUNC_OWNER = "owner";
 
-    public static final String FUNC_POSTVALIDATION = "postValidation";
+    public static final String FUNC_POSTATTESTATION = "postAttestation";
 
-    public static final String FUNC_RENOUNCEOWNERSHIP = "renounceOwnership";
+    public static final String FUNC_POSTEIP712ATTESTATION = "postEIP712Attestation";
 
-    public static final String FUNC_TRANSFEROWNERSHIP = "transferOwnership";
+    public static final String FUNC_REMOVEVALIDATOR = "removeValidator";
 
-    public static final String FUNC_VALIDATIONS = "validations";
+    public static final String FUNC_SETOPENVALIDATION = "setOpenValidation";
 
     public static final String FUNC_VALIDATORS = "validators";
 
-    public static final Event OWNERSHIPTRANSFERRED_EVENT = new Event("OwnershipTransferred", 
-            Arrays.<TypeReference<?>>asList(new TypeReference<Address>(true) {}, new TypeReference<Address>(true) {}));
+    public static final Event ATTESTATIONPOSTED_EVENT = new Event("AttestationPosted", 
+            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>(true) {}, new TypeReference<Address>(true) {}, new TypeReference<Bytes32>(true) {}, new TypeReference<Uint8>() {}, new TypeReference<Uint8>() {}));
     ;
 
-    public static final Event VALIDATIONPOSTED_EVENT = new Event("ValidationPosted", 
-            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>(true) {}, new TypeReference<Bytes32>() {}, new TypeReference<Uint8>() {}, new TypeReference<Address>(true) {}));
+    public static final Event VALIDATORADDED_EVENT = new Event("ValidatorAdded", 
+            Arrays.<TypeReference<?>>asList(new TypeReference<Address>(true) {}));
+    ;
+
+    public static final Event VALIDATORREMOVED_EVENT = new Event("ValidatorRemoved", 
+            Arrays.<TypeReference<?>>asList(new TypeReference<Address>(true) {}));
     ;
 
     @Deprecated
@@ -96,93 +111,168 @@ public class ValidationRegistry extends Contract {
         super(BINARY, contractAddress, web3j, transactionManager, contractGasProvider);
     }
 
-    public static List<OwnershipTransferredEventResponse> getOwnershipTransferredEvents(
+    public static List<AttestationPostedEventResponse> getAttestationPostedEvents(
             TransactionReceipt transactionReceipt) {
-        List<Contract.EventValuesWithLog> valueList = staticExtractEventParametersWithLog(OWNERSHIPTRANSFERRED_EVENT, transactionReceipt);
-        ArrayList<OwnershipTransferredEventResponse> responses = new ArrayList<OwnershipTransferredEventResponse>(valueList.size());
+        List<Contract.EventValuesWithLog> valueList = staticExtractEventParametersWithLog(ATTESTATIONPOSTED_EVENT, transactionReceipt);
+        ArrayList<AttestationPostedEventResponse> responses = new ArrayList<AttestationPostedEventResponse>(valueList.size());
         for (Contract.EventValuesWithLog eventValues : valueList) {
-            OwnershipTransferredEventResponse typedResponse = new OwnershipTransferredEventResponse();
-            typedResponse.log = eventValues.getLog();
-            typedResponse.previousOwner = (String) eventValues.getIndexedValues().get(0).getValue();
-            typedResponse.newOwner = (String) eventValues.getIndexedValues().get(1).getValue();
-            responses.add(typedResponse);
-        }
-        return responses;
-    }
-
-    public static OwnershipTransferredEventResponse getOwnershipTransferredEventFromLog(Log log) {
-        Contract.EventValuesWithLog eventValues = staticExtractEventParametersWithLog(OWNERSHIPTRANSFERRED_EVENT, log);
-        OwnershipTransferredEventResponse typedResponse = new OwnershipTransferredEventResponse();
-        typedResponse.log = log;
-        typedResponse.previousOwner = (String) eventValues.getIndexedValues().get(0).getValue();
-        typedResponse.newOwner = (String) eventValues.getIndexedValues().get(1).getValue();
-        return typedResponse;
-    }
-
-    public Flowable<OwnershipTransferredEventResponse> ownershipTransferredEventFlowable(
-            EthFilter filter) {
-        return web3j.ethLogFlowable(filter).map(log -> getOwnershipTransferredEventFromLog(log));
-    }
-
-    public Flowable<OwnershipTransferredEventResponse> ownershipTransferredEventFlowable(
-            DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
-        EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
-        filter.addSingleTopic(EventEncoder.encode(OWNERSHIPTRANSFERRED_EVENT));
-        return ownershipTransferredEventFlowable(filter);
-    }
-
-    public static List<ValidationPostedEventResponse> getValidationPostedEvents(
-            TransactionReceipt transactionReceipt) {
-        List<Contract.EventValuesWithLog> valueList = staticExtractEventParametersWithLog(VALIDATIONPOSTED_EVENT, transactionReceipt);
-        ArrayList<ValidationPostedEventResponse> responses = new ArrayList<ValidationPostedEventResponse>(valueList.size());
-        for (Contract.EventValuesWithLog eventValues : valueList) {
-            ValidationPostedEventResponse typedResponse = new ValidationPostedEventResponse();
+            AttestationPostedEventResponse typedResponse = new AttestationPostedEventResponse();
             typedResponse.log = eventValues.getLog();
             typedResponse.agentId = (BigInteger) eventValues.getIndexedValues().get(0).getValue();
             typedResponse.validator = (String) eventValues.getIndexedValues().get(1).getValue();
-            typedResponse.artifactHash = (byte[]) eventValues.getNonIndexedValues().get(0).getValue();
-            typedResponse.score = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
+            typedResponse.checkpointHash = (byte[]) eventValues.getIndexedValues().get(2).getValue();
+            typedResponse.score = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+            typedResponse.proofType = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
             responses.add(typedResponse);
         }
         return responses;
     }
 
-    public static ValidationPostedEventResponse getValidationPostedEventFromLog(Log log) {
-        Contract.EventValuesWithLog eventValues = staticExtractEventParametersWithLog(VALIDATIONPOSTED_EVENT, log);
-        ValidationPostedEventResponse typedResponse = new ValidationPostedEventResponse();
+    public static AttestationPostedEventResponse getAttestationPostedEventFromLog(Log log) {
+        Contract.EventValuesWithLog eventValues = staticExtractEventParametersWithLog(ATTESTATIONPOSTED_EVENT, log);
+        AttestationPostedEventResponse typedResponse = new AttestationPostedEventResponse();
         typedResponse.log = log;
         typedResponse.agentId = (BigInteger) eventValues.getIndexedValues().get(0).getValue();
         typedResponse.validator = (String) eventValues.getIndexedValues().get(1).getValue();
-        typedResponse.artifactHash = (byte[]) eventValues.getNonIndexedValues().get(0).getValue();
-        typedResponse.score = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
+        typedResponse.checkpointHash = (byte[]) eventValues.getIndexedValues().get(2).getValue();
+        typedResponse.score = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+        typedResponse.proofType = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
         return typedResponse;
     }
 
-    public Flowable<ValidationPostedEventResponse> validationPostedEventFlowable(EthFilter filter) {
-        return web3j.ethLogFlowable(filter).map(log -> getValidationPostedEventFromLog(log));
+    public Flowable<AttestationPostedEventResponse> attestationPostedEventFlowable(
+            EthFilter filter) {
+        return web3j.ethLogFlowable(filter).map(log -> getAttestationPostedEventFromLog(log));
     }
 
-    public Flowable<ValidationPostedEventResponse> validationPostedEventFlowable(
+    public Flowable<AttestationPostedEventResponse> attestationPostedEventFlowable(
             DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
         EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
-        filter.addSingleTopic(EventEncoder.encode(VALIDATIONPOSTED_EVENT));
-        return validationPostedEventFlowable(filter);
+        filter.addSingleTopic(EventEncoder.encode(ATTESTATIONPOSTED_EVENT));
+        return attestationPostedEventFlowable(filter);
     }
 
-    public RemoteFunctionCall<TransactionReceipt> addValidator(BigInteger agentId,
-            String validator) {
+    public static List<ValidatorAddedEventResponse> getValidatorAddedEvents(
+            TransactionReceipt transactionReceipt) {
+        List<Contract.EventValuesWithLog> valueList = staticExtractEventParametersWithLog(VALIDATORADDED_EVENT, transactionReceipt);
+        ArrayList<ValidatorAddedEventResponse> responses = new ArrayList<ValidatorAddedEventResponse>(valueList.size());
+        for (Contract.EventValuesWithLog eventValues : valueList) {
+            ValidatorAddedEventResponse typedResponse = new ValidatorAddedEventResponse();
+            typedResponse.log = eventValues.getLog();
+            typedResponse.validator = (String) eventValues.getIndexedValues().get(0).getValue();
+            responses.add(typedResponse);
+        }
+        return responses;
+    }
+
+    public static ValidatorAddedEventResponse getValidatorAddedEventFromLog(Log log) {
+        Contract.EventValuesWithLog eventValues = staticExtractEventParametersWithLog(VALIDATORADDED_EVENT, log);
+        ValidatorAddedEventResponse typedResponse = new ValidatorAddedEventResponse();
+        typedResponse.log = log;
+        typedResponse.validator = (String) eventValues.getIndexedValues().get(0).getValue();
+        return typedResponse;
+    }
+
+    public Flowable<ValidatorAddedEventResponse> validatorAddedEventFlowable(EthFilter filter) {
+        return web3j.ethLogFlowable(filter).map(log -> getValidatorAddedEventFromLog(log));
+    }
+
+    public Flowable<ValidatorAddedEventResponse> validatorAddedEventFlowable(
+            DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
+        EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
+        filter.addSingleTopic(EventEncoder.encode(VALIDATORADDED_EVENT));
+        return validatorAddedEventFlowable(filter);
+    }
+
+    public static List<ValidatorRemovedEventResponse> getValidatorRemovedEvents(
+            TransactionReceipt transactionReceipt) {
+        List<Contract.EventValuesWithLog> valueList = staticExtractEventParametersWithLog(VALIDATORREMOVED_EVENT, transactionReceipt);
+        ArrayList<ValidatorRemovedEventResponse> responses = new ArrayList<ValidatorRemovedEventResponse>(valueList.size());
+        for (Contract.EventValuesWithLog eventValues : valueList) {
+            ValidatorRemovedEventResponse typedResponse = new ValidatorRemovedEventResponse();
+            typedResponse.log = eventValues.getLog();
+            typedResponse.validator = (String) eventValues.getIndexedValues().get(0).getValue();
+            responses.add(typedResponse);
+        }
+        return responses;
+    }
+
+    public static ValidatorRemovedEventResponse getValidatorRemovedEventFromLog(Log log) {
+        Contract.EventValuesWithLog eventValues = staticExtractEventParametersWithLog(VALIDATORREMOVED_EVENT, log);
+        ValidatorRemovedEventResponse typedResponse = new ValidatorRemovedEventResponse();
+        typedResponse.log = log;
+        typedResponse.validator = (String) eventValues.getIndexedValues().get(0).getValue();
+        return typedResponse;
+    }
+
+    public Flowable<ValidatorRemovedEventResponse> validatorRemovedEventFlowable(EthFilter filter) {
+        return web3j.ethLogFlowable(filter).map(log -> getValidatorRemovedEventFromLog(log));
+    }
+
+    public Flowable<ValidatorRemovedEventResponse> validatorRemovedEventFlowable(
+            DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
+        EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
+        filter.addSingleTopic(EventEncoder.encode(VALIDATORREMOVED_EVENT));
+        return validatorRemovedEventFlowable(filter);
+    }
+
+    public RemoteFunctionCall<TransactionReceipt> addValidator(String validator) {
         final Function function = new Function(
                 FUNC_ADDVALIDATOR, 
-                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(agentId), 
-                new org.web3j.abi.datatypes.Address(160, validator)), 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.Address(160, validator)), 
                 Collections.<TypeReference<?>>emptyList());
         return executeRemoteCallTransaction(function);
     }
 
-    public RemoteFunctionCall<List> getValidations(BigInteger agentId) {
-        final Function function = new Function(FUNC_GETVALIDATIONS, 
+    public RemoteFunctionCall<String> agentRegistry() {
+        final Function function = new Function(FUNC_AGENTREGISTRY, 
+                Arrays.<Type>asList(), 
+                Arrays.<TypeReference<?>>asList(new TypeReference<Address>() {}));
+        return executeRemoteCallSingleValueReturn(function, String.class);
+    }
+
+    public RemoteFunctionCall<BigInteger> attestationCount(BigInteger param0) {
+        final Function function = new Function(FUNC_ATTESTATIONCOUNT, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(param0)), 
+                Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+        return executeRemoteCallSingleValueReturn(function, BigInteger.class);
+    }
+
+    public RemoteFunctionCall<Tuple8<BigInteger, String, byte[], BigInteger, BigInteger, byte[], String, BigInteger>> checkpointAttestations(
+            byte[] param0) {
+        final Function function = new Function(FUNC_CHECKPOINTATTESTATIONS, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Bytes32(param0)), 
+                Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}, new TypeReference<Address>() {}, new TypeReference<Bytes32>() {}, new TypeReference<Uint8>() {}, new TypeReference<Uint8>() {}, new TypeReference<DynamicBytes>() {}, new TypeReference<Utf8String>() {}, new TypeReference<Uint256>() {}));
+        return new RemoteFunctionCall<Tuple8<BigInteger, String, byte[], BigInteger, BigInteger, byte[], String, BigInteger>>(function,
+                new Callable<Tuple8<BigInteger, String, byte[], BigInteger, BigInteger, byte[], String, BigInteger>>() {
+                    @Override
+                    public Tuple8<BigInteger, String, byte[], BigInteger, BigInteger, byte[], String, BigInteger> call(
+                            ) throws Exception {
+                        List<Type> results = executeCallMultipleValueReturn(function);
+                        return new Tuple8<BigInteger, String, byte[], BigInteger, BigInteger, byte[], String, BigInteger>(
+                                (BigInteger) results.get(0).getValue(), 
+                                (String) results.get(1).getValue(), 
+                                (byte[]) results.get(2).getValue(), 
+                                (BigInteger) results.get(3).getValue(), 
+                                (BigInteger) results.get(4).getValue(), 
+                                (byte[]) results.get(5).getValue(), 
+                                (String) results.get(6).getValue(), 
+                                (BigInteger) results.get(7).getValue());
+                    }
+                });
+    }
+
+    public RemoteFunctionCall<Attestation> getAttestation(byte[] checkpointHash) {
+        final Function function = new Function(FUNC_GETATTESTATION, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Bytes32(checkpointHash)), 
+                Arrays.<TypeReference<?>>asList(new TypeReference<Attestation>() {}));
+        return executeRemoteCallSingleValueReturn(function, Attestation.class);
+    }
+
+    public RemoteFunctionCall<List> getAttestations(BigInteger agentId) {
+        final Function function = new Function(FUNC_GETATTESTATIONS, 
                 Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(agentId)), 
-                Arrays.<TypeReference<?>>asList(new TypeReference<DynamicArray<Validation>>() {}));
+                Arrays.<TypeReference<?>>asList(new TypeReference<DynamicArray<Attestation>>() {}));
         return new RemoteFunctionCall<List>(function,
                 new Callable<List>() {
                     @Override
@@ -194,6 +284,20 @@ public class ValidationRegistry extends Contract {
                 });
     }
 
+    public RemoteFunctionCall<BigInteger> getAverageValidationScore(BigInteger agentId) {
+        final Function function = new Function(FUNC_GETAVERAGEVALIDATIONSCORE, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(agentId)), 
+                Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+        return executeRemoteCallSingleValueReturn(function, BigInteger.class);
+    }
+
+    public RemoteFunctionCall<Boolean> openValidation() {
+        final Function function = new Function(FUNC_OPENVALIDATION, 
+                Arrays.<Type>asList(), 
+                Arrays.<TypeReference<?>>asList(new TypeReference<Bool>() {}));
+        return executeRemoteCallSingleValueReturn(function, Boolean.class);
+    }
+
     public RemoteFunctionCall<String> owner() {
         final Function function = new Function(FUNC_OWNER, 
                 Arrays.<Type>asList(), 
@@ -201,57 +305,52 @@ public class ValidationRegistry extends Contract {
         return executeRemoteCallSingleValueReturn(function, String.class);
     }
 
-    public RemoteFunctionCall<TransactionReceipt> postValidation(BigInteger agentId,
-            byte[] artifactHash, BigInteger score) {
+    public RemoteFunctionCall<TransactionReceipt> postAttestation(BigInteger agentId,
+            byte[] checkpointHash, BigInteger score, BigInteger proofType, byte[] proof,
+            String notes) {
         final Function function = new Function(
-                FUNC_POSTVALIDATION, 
+                FUNC_POSTATTESTATION, 
                 Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(agentId), 
-                new org.web3j.abi.datatypes.generated.Bytes32(artifactHash), 
-                new org.web3j.abi.datatypes.generated.Uint8(score)), 
+                new org.web3j.abi.datatypes.generated.Bytes32(checkpointHash), 
+                new org.web3j.abi.datatypes.generated.Uint8(score), 
+                new org.web3j.abi.datatypes.generated.Uint8(proofType), 
+                new org.web3j.abi.datatypes.DynamicBytes(proof), 
+                new org.web3j.abi.datatypes.Utf8String(notes)), 
                 Collections.<TypeReference<?>>emptyList());
         return executeRemoteCallTransaction(function);
     }
 
-    public RemoteFunctionCall<TransactionReceipt> renounceOwnership() {
+    public RemoteFunctionCall<TransactionReceipt> postEIP712Attestation(BigInteger agentId,
+            byte[] checkpointHash, BigInteger score, String notes) {
         final Function function = new Function(
-                FUNC_RENOUNCEOWNERSHIP, 
-                Arrays.<Type>asList(), 
+                FUNC_POSTEIP712ATTESTATION, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(agentId), 
+                new org.web3j.abi.datatypes.generated.Bytes32(checkpointHash), 
+                new org.web3j.abi.datatypes.generated.Uint8(score), 
+                new org.web3j.abi.datatypes.Utf8String(notes)), 
                 Collections.<TypeReference<?>>emptyList());
         return executeRemoteCallTransaction(function);
     }
 
-    public RemoteFunctionCall<TransactionReceipt> transferOwnership(String newOwner) {
+    public RemoteFunctionCall<TransactionReceipt> removeValidator(String validator) {
         final Function function = new Function(
-                FUNC_TRANSFEROWNERSHIP, 
-                Arrays.<Type>asList(new org.web3j.abi.datatypes.Address(160, newOwner)), 
+                FUNC_REMOVEVALIDATOR, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.Address(160, validator)), 
                 Collections.<TypeReference<?>>emptyList());
         return executeRemoteCallTransaction(function);
     }
 
-    public RemoteFunctionCall<Tuple4<byte[], BigInteger, BigInteger, String>> validations(
-            BigInteger param0, BigInteger param1) {
-        final Function function = new Function(FUNC_VALIDATIONS, 
-                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(param0), 
-                new org.web3j.abi.datatypes.generated.Uint256(param1)), 
-                Arrays.<TypeReference<?>>asList(new TypeReference<Bytes32>() {}, new TypeReference<Uint8>() {}, new TypeReference<Uint256>() {}, new TypeReference<Address>() {}));
-        return new RemoteFunctionCall<Tuple4<byte[], BigInteger, BigInteger, String>>(function,
-                new Callable<Tuple4<byte[], BigInteger, BigInteger, String>>() {
-                    @Override
-                    public Tuple4<byte[], BigInteger, BigInteger, String> call() throws Exception {
-                        List<Type> results = executeCallMultipleValueReturn(function);
-                        return new Tuple4<byte[], BigInteger, BigInteger, String>(
-                                (byte[]) results.get(0).getValue(), 
-                                (BigInteger) results.get(1).getValue(), 
-                                (BigInteger) results.get(2).getValue(), 
-                                (String) results.get(3).getValue());
-                    }
-                });
+    public RemoteFunctionCall<TransactionReceipt> setOpenValidation(Boolean open) {
+        final Function function = new Function(
+                FUNC_SETOPENVALIDATION, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.Bool(open)), 
+                Collections.<TypeReference<?>>emptyList());
+        return executeRemoteCallTransaction(function);
     }
 
-    public RemoteFunctionCall<Boolean> validators(BigInteger param0, String param1) {
+    public RemoteFunctionCall<Boolean> validators(String param0) {
         final Function function = new Function(FUNC_VALIDATORS, 
-                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(param0), 
-                new org.web3j.abi.datatypes.Address(160, param1)), 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.Address(160, param0)), 
                 Arrays.<TypeReference<?>>asList(new TypeReference<Bool>() {}));
         return executeRemoteCallSingleValueReturn(function, Boolean.class);
     }
@@ -278,83 +377,75 @@ public class ValidationRegistry extends Contract {
         return new ValidationRegistry(contractAddress, web3j, transactionManager, contractGasProvider);
     }
 
-    public static RemoteCall<ValidationRegistry> deploy(Web3j web3j, Credentials credentials,
-            ContractGasProvider contractGasProvider) {
-        return deployRemoteCall(ValidationRegistry.class, web3j, credentials, contractGasProvider, getDeploymentBinary(), "");
-    }
-
-    public static RemoteCall<ValidationRegistry> deploy(Web3j web3j,
-            TransactionManager transactionManager, ContractGasProvider contractGasProvider) {
-        return deployRemoteCall(ValidationRegistry.class, web3j, transactionManager, contractGasProvider, getDeploymentBinary(), "");
-    }
-
-    @Deprecated
-    public static RemoteCall<ValidationRegistry> deploy(Web3j web3j, Credentials credentials,
-            BigInteger gasPrice, BigInteger gasLimit) {
-        return deployRemoteCall(ValidationRegistry.class, web3j, credentials, gasPrice, gasLimit, getDeploymentBinary(), "");
-    }
-
-    @Deprecated
-    public static RemoteCall<ValidationRegistry> deploy(Web3j web3j,
-            TransactionManager transactionManager, BigInteger gasPrice, BigInteger gasLimit) {
-        return deployRemoteCall(ValidationRegistry.class, web3j, transactionManager, gasPrice, gasLimit, getDeploymentBinary(), "");
-    }
-
-    public static void linkLibraries(List<Contract.LinkReference> references) {
-        librariesLinkedBinary = linkBinaryWithReferences(BINARY, references);
-    }
-
-    private static String getDeploymentBinary() {
-        if (librariesLinkedBinary != null) {
-            return librariesLinkedBinary;
-        } else {
-            return BINARY;
-        }
-    }
-
-    public static class Validation extends StaticStruct {
-        public byte[] artifactHash;
-
-        public BigInteger score;
-
-        public BigInteger timestamp;
-
-        public String validator;
-
-        public Validation(byte[] artifactHash, BigInteger score, BigInteger timestamp,
-                String validator) {
-            super(new org.web3j.abi.datatypes.generated.Bytes32(artifactHash), 
-                    new org.web3j.abi.datatypes.generated.Uint8(score), 
-                    new org.web3j.abi.datatypes.generated.Uint256(timestamp), 
-                    new org.web3j.abi.datatypes.Address(160, validator));
-            this.artifactHash = artifactHash;
-            this.score = score;
-            this.timestamp = timestamp;
-            this.validator = validator;
-        }
-
-        public Validation(Bytes32 artifactHash, Uint8 score, Uint256 timestamp, Address validator) {
-            super(artifactHash, score, timestamp, validator);
-            this.artifactHash = artifactHash.getValue();
-            this.score = score.getValue();
-            this.timestamp = timestamp.getValue();
-            this.validator = validator.getValue();
-        }
-    }
-
-    public static class OwnershipTransferredEventResponse extends BaseEventResponse {
-        public String previousOwner;
-
-        public String newOwner;
-    }
-
-    public static class ValidationPostedEventResponse extends BaseEventResponse {
+    public static class Attestation extends DynamicStruct {
         public BigInteger agentId;
 
         public String validator;
 
-        public byte[] artifactHash;
+        public byte[] checkpointHash;
 
         public BigInteger score;
+
+        public BigInteger proofType;
+
+        public byte[] proof;
+
+        public String notes;
+
+        public BigInteger timestamp;
+
+        public Attestation(BigInteger agentId, String validator, byte[] checkpointHash,
+                BigInteger score, BigInteger proofType, byte[] proof, String notes,
+                BigInteger timestamp) {
+            super(new org.web3j.abi.datatypes.generated.Uint256(agentId), 
+                    new org.web3j.abi.datatypes.Address(160, validator), 
+                    new org.web3j.abi.datatypes.generated.Bytes32(checkpointHash), 
+                    new org.web3j.abi.datatypes.generated.Uint8(score), 
+                    new org.web3j.abi.datatypes.generated.Uint8(proofType), 
+                    new org.web3j.abi.datatypes.DynamicBytes(proof), 
+                    new org.web3j.abi.datatypes.Utf8String(notes), 
+                    new org.web3j.abi.datatypes.generated.Uint256(timestamp));
+            this.agentId = agentId;
+            this.validator = validator;
+            this.checkpointHash = checkpointHash;
+            this.score = score;
+            this.proofType = proofType;
+            this.proof = proof;
+            this.notes = notes;
+            this.timestamp = timestamp;
+        }
+
+        public Attestation(Uint256 agentId, Address validator, Bytes32 checkpointHash, Uint8 score,
+                Uint8 proofType, DynamicBytes proof, Utf8String notes, Uint256 timestamp) {
+            super(agentId, validator, checkpointHash, score, proofType, proof, notes, timestamp);
+            this.agentId = agentId.getValue();
+            this.validator = validator.getValue();
+            this.checkpointHash = checkpointHash.getValue();
+            this.score = score.getValue();
+            this.proofType = proofType.getValue();
+            this.proof = proof.getValue();
+            this.notes = notes.getValue();
+            this.timestamp = timestamp.getValue();
+        }
+    }
+
+    public static class AttestationPostedEventResponse extends BaseEventResponse {
+        public BigInteger agentId;
+
+        public String validator;
+
+        public byte[] checkpointHash;
+
+        public BigInteger score;
+
+        public BigInteger proofType;
+    }
+
+    public static class ValidatorAddedEventResponse extends BaseEventResponse {
+        public String validator;
+    }
+
+    public static class ValidatorRemovedEventResponse extends BaseEventResponse {
+        public String validator;
     }
 }

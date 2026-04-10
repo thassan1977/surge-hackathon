@@ -112,7 +112,6 @@ public class MarketDataService {
 
     // ── Cache ─────────────────────────────────────────────────────────────────
     private volatile MarketState latestMarketState = null;
-    private volatile String      latestSymbol      = "ETH/USDC";
     private volatile long        lastWarmupLogMs   = 0;
 
     private volatile double      livePrice;
@@ -159,7 +158,7 @@ public class MarketDataService {
 
         // This allows getUnifiedState() to grab the real tick price
         this.latestPrice  = midPrice;
-        this.latestSymbol = symbol;
+
 
         // Internal bar-closing and indicator logic needs protection.
         synchronized (this) {
@@ -308,7 +307,7 @@ public class MarketDataService {
 
     @Scheduled(cron = "0 0 0 * * *")   // midnight UTC
     public synchronized void resetSessionDelta() {
-        log.info("Session CVD reset. Final session delta: {:.2f}", cumulativeVolumeDelta);
+        log.info("Session CVD reset. Final session delta: {}", cumulativeVolumeDelta);
         cumulativeVolumeDelta = 0.0;
     }
 

@@ -1,5 +1,6 @@
 package com.surge.agent.config;
 
+import com.surge.agent.contracts.HackathonVault;
 import com.surge.agent.contracts.ReputationRegistry;
 import com.surge.agent.contracts.ValidationRegistry;
 import com.surge.agent.services.IdentityService;
@@ -19,6 +20,7 @@ import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.tx.RawTransactionManager;
 import org.web3j.tx.TransactionManager;
 import org.web3j.tx.gas.ContractGasProvider;
+import org.web3j.tx.gas.DefaultGasProvider;
 import org.web3j.tx.response.PollingTransactionReceiptProcessor;
 
 import java.math.BigDecimal;
@@ -76,60 +78,55 @@ public class VaultInitializer implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-        try {
-            log.info("=== Vault Initialization (Sepolia) ===");
-            log.info("Agent Wallet : {}", credentials.getAddress());
-            log.info("Vault Address: {}", vaultAddress);
-            log.info("USDC Address : {}", usdcAddress);
-            log.info("Router       : {}", routerAddress);
-
-            // ── STEP 0: Register agent identity ──────────────────────────────
-            if (!identityService.isRegistered()) {
-                log.info("Registering agent identity...");
-                identityService.registerAgent(metadataUri);
-            }
-            BigInteger agentId = identityService.getAgentId();
-            log.info("Agent ID: {}", agentId);
-
-            // ── STEP 1: Approve HackathonVault to spend USDC ─────────────────
-            // The vault pulls USDC from our wallet during deposit().
-            // Without this approve the deposit reverts.
-            log.info("Step 1: Approving HackathonVault to spend USDC...");
-            boolean vaultApproved = approveSpender(vaultAddress, MAX_APPROVAL, "HackathonVault");
-            if (!vaultApproved) {
-                log.error("Vault approval failed — aborting initialisation.");
-                return;
-            }
-
-            // ── STEP 2: Deposit USDC into HackathonVault for this agent ──────
-            // HackathonVault.deposit(agentId, amount) records the balance
-            // against our specific agentId on-chain.
-            log.info("Step 2: Depositing {} USDC into HackathonVault for agent {}...",
-                    formatUsdc(DEPOSIT_AMOUNT), agentId);
-            boolean deposited = depositIntoVault(agentId, DEPOSIT_AMOUNT);
-            if (!deposited) {
-                log.warn("Vault deposit failed or already funded — continuing.");
-                // Not fatal: if already deposited on a previous run, we continue.
-            }
-
-            // ── STEP 3: Approve RiskRouter to spend remaining wallet USDC ────
-            // executeBuy() submits a TradeIntent through the RiskRouter.
-            // The router pulls USDC directly from our wallet during swap.
-            // This approval is SEPARATE from the vault approval above.
-            log.info("Step 3: Approving RiskRouter to spend USDC...");
-            approveSpender(routerAddress, MAX_APPROVAL, "RiskRouter");
-
-            // ── STEP 4: Register as validator ─────────────────────────────────
-            // Required for ReputationRegistry.recordValidatorScore() to succeed.
-            // Without this, every reputation update reverts.
-            log.info("Step 4: Registering validator...");
-            registerValidator(agentId);
-
-            log.info("=== Vault Initialization Complete (agent={}) ===", agentId);
-
-        } catch (Exception e) {
-            log.error("VAULT INITIALIZER ERROR: {}", e.getMessage(), e);
-        }
+//        try {
+//            log.info("=== Vault Initialization (Sepolia) ===");
+//            log.info("Agent Wallet : {}", credentials.getAddress());
+//            log.info("Vault Address: {}", vaultAddress);
+//            log.info("USDC Address : {}", usdcAddress);
+//            log.info("Router       : {}", routerAddress);
+//
+//            // ── STEP 0: Register agent identity ──────────────────────────────
+//            if (!identityService.isRegistered()) {
+//                log.info("Registering agent identity...");
+//                identityService.registerAgent(metadataUri);
+//            }
+//            BigInteger agentId = identityService.getAgentId();
+//            log.info("Agent ID: {}", agentId);
+//
+//            // ── STEP 1: Approve HackathonVault to spend USDC ─────────────────
+//            // The vault pulls USDC from our wallet during deposit().
+//            // Without this approve the deposit reverts.
+//            log.info("Step 1: Approving HackathonVault to spend USDC...");
+//            boolean vaultApproved = approveSpender(vaultAddress, MAX_APPROVAL, "HackathonVault");
+//            if (!vaultApproved) {
+//                log.error("Vault approval failed — aborting initialisation.");
+//                return;
+//            }
+//
+//            // ── STEP 2: Deposit USDC into HackathonVault for this agent ──────
+//            // HackathonVault.deposit(agentId, amount) records the balance
+//            // against our specific agentId on-chain.
+//            log.info("Step 2: Depositing {} USDC into HackathonVault for agent {}...",
+//                    formatUsdc(DEPOSIT_AMOUNT), agentId);
+//            boolean deposited = depositIntoVault(DEPOSIT_AMOUNT);
+//            if (!deposited) {
+//                log.warn("Vault deposit failed or already funded — continuing.");
+//                // Not fatal: if already deposited on a previous run, we continue.
+//            }
+//
+//            // ── STEP 3: Approve RiskRouter to spend remaining wallet USDC ────
+//            // executeBuy() submits a TradeIntent through the RiskRouter.
+//            // The router pulls USDC directly from our wallet during swap.
+//            // This approval is SEPARATE from the vault approval above.
+//            log.info("Step 3: Approving RiskRouter to spend USDC...");
+//            approveSpender(routerAddress, MAX_APPROVAL, "RiskRouter");
+//
+//
+//            log.info("=== Vault Initialization Complete (agent={}) ===", agentId);
+//
+//        } catch (Exception e) {
+//            log.error("VAULT INITIALIZER ERROR: {}", e.getMessage(), e);
+//        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -177,87 +174,30 @@ public class VaultInitializer implements CommandLineRunner {
     // Using raw transaction — avoids MockVault ABI mismatch
     // ─────────────────────────────────────────────────────────────────────────
 
-    private boolean depositIntoVault(BigInteger agentId, BigInteger amount) {
+    private boolean depositIntoVault(BigInteger amountInWei) {
         try {
-            Function depositFunc = new Function(
-                    "deposit",
-                    Arrays.asList(new Uint256(agentId), new Uint256(amount)),
-                    Collections.emptyList()
-            );
-            TransactionManager txManager = new RawTransactionManager(web3j, credentials);
-            EthSendTransaction tx = txManager.sendTransaction(
-                    gasProvider.getGasPrice("deposit"),
-                    gasProvider.getGasLimit("deposit"),
+            // 1. Load the contract using the wrapper
+            HackathonVault vault = HackathonVault.load(
                     vaultAddress,
-                    FunctionEncoder.encode(depositFunc),
-                    BigInteger.ZERO
+                    web3j,
+                    credentials,
+                    new DefaultGasProvider() // Or your custom gas provider
             );
-            if (tx.hasError()) {
-                log.error("deposit() send error: {}", tx.getError().getMessage());
-                return false;
-            }
-            TransactionReceipt receipt = new PollingTransactionReceiptProcessor(web3j, 1000, 15)
-                    .waitForTransactionReceipt(tx.getTransactionHash());
+
+            // 2. Call the deposit function
+            // Note: The parameter here is the amount of ETH/Wei you are sending TO the contract.
+            TransactionReceipt receipt = vault.deposit(amountInWei).send();
 
             if (receipt.isStatusOK()) {
-                log.info("Vault deposit confirmed. agent={} amount={} USDC tx={}",
-                        agentId, formatUsdc(amount),
-                        tx.getTransactionHash().substring(0, 14) + "...");
+                log.info("Vault deposit confirmed. Tx: {}", receipt.getTransactionHash());
                 return true;
             } else {
-                log.error("Vault deposit reverted. Check USDC balance and allowance.");
+                log.error("Vault deposit reverted.");
                 return false;
             }
         } catch (Exception e) {
-            log.error("depositIntoVault exception: {}", e.getMessage());
+            log.error("Deposit failed: {}", e.getMessage());
             return false;
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Validator registration — UNCHANGED from original (was correct)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    private void registerValidator(BigInteger agentId) {
-        try {
-            ReputationRegistry rep = ReputationRegistry.load(
-                    contractConfig.getReputation(), web3j, credentials, gasProvider);
-
-            registerAddress(rep, agentId, credentials.getAddress());
-
-            if (validatorPrivateKey != null && !validatorPrivateKey.isBlank()) {
-                String validatorAddress = Credentials.create(validatorPrivateKey).getAddress();
-                registerAddress(rep, agentId, validatorAddress);
-            }
-
-            try {
-                ValidationRegistry val = ValidationRegistry.load(
-                        contractConfig.getValidation(), web3j, credentials, gasProvider);
-                val.addValidator(agentId, credentials.getAddress()).send();
-                log.info("Registered on ValidationRegistry for agent {}", agentId);
-            } catch (Exception e) {
-                log.warn("ValidationRegistry.addValidator failed (may already be registered): {}",
-                        e.getMessage());
-            }
-
-        } catch (Exception e) {
-            log.error("registerValidator failed: {}", e.getMessage());
-        }
-    }
-
-    private void registerAddress(ReputationRegistry rep,
-                                 BigInteger agentId,
-                                 String address) throws Exception {
-        Boolean already = rep.validators(agentId, address).send();
-        if (Boolean.TRUE.equals(already)) {
-            log.info("Already a validator: agent={} address={}", agentId, address);
-            return;
-        }
-        TransactionReceipt r = rep.addValidator(agentId, address).send();
-        if (r.isStatusOK()) {
-            log.info("Validator registered: agent={} address={}", agentId, address);
-        } else {
-            log.error("addValidator reverted for address={}", address);
         }
     }
 

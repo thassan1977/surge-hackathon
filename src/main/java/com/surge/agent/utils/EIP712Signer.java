@@ -67,22 +67,20 @@ import java.util.Arrays;
 public class EIP712Signer {
 
     // ── EIP-712 type strings — must be identical byte-for-byte to Solidity ──
-
     private static final String DOMAIN_TYPE =
             "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 
     private static final String TRADE_INTENT_TYPE =
-            "TradeIntent(uint256 agentId,address tokenIn,address tokenOut," +
-                    "uint256 amountIn,uint256 minAmountOut,uint256 deadline,bytes32 riskParams)";
+            "TradeIntent(uint256 agentId,address agentWallet,string pair,string action,uint256 amountUsdScaled,uint256 maxSlippageBps,uint256 nonce,uint256 deadline)";
 
-    // ── Pre-computed type hashes (constant — computed once at class load) ────
+    // ── Pre-computed type hashes ────
 
     private static final byte[] DOMAIN_TYPEHASH       = keccak256(utf8(DOMAIN_TYPE));
     private static final byte[] TRADE_INTENT_TYPEHASH = keccak256(utf8(TRADE_INTENT_TYPE));
 
-    // ── Domain name / version — must match Solidity constructor args ─────────
-
-    private static final byte[] NAME_HASH    = keccak256(utf8("MockRiskRouter"));
+    // ── Domain name / version ─────────
+    // CHANGED: Removed "Mock" to match live testnet contract
+    private static final byte[] NAME_HASH    = keccak256(utf8("RiskRouter"));
     private static final byte[] VERSION_HASH = keccak256(utf8("1"));
 
     // ── Runtime config ───────────────────────────────────────────────────────
@@ -197,16 +195,22 @@ public class EIP712Signer {
      * Field order MUST match the Solidity struct field order exactly.
      */
     private byte[] buildStructHash(TradeIntent intent) {
-        // 8 fields × 32 bytes each = 256 bytes
-        ByteBuffer buf = ByteBuffer.allocate(256);
+        // 1 TypeHash + 8 fields = 9 slots × 32 bytes each = 288 bytes
+        ByteBuffer buf = ByteBuffer.allocate(288);
         buf.put(TRADE_INTENT_TYPEHASH);
+
         buf.put(uint256(intent.getAgentId()));
-        buf.put(address(intent.getTokenIn()));
-        buf.put(address(intent.getTokenOut()));
-        buf.put(uint256(intent.getAmountIn()));
-        buf.put(uint256(intent.getMinAmountOut()));
+        buf.put(address(intent.getAgentWallet()));
+
+        // Strings are dynamic types in EIP-712, they must be hashed!
+        buf.put(keccak256(utf8(intent.getPair())));
+        buf.put(keccak256(utf8(intent.getAction())));
+
+        buf.put(uint256(intent.getAmountUsdScaled()));
+        buf.put(uint256(intent.getMaxSlippageBps()));
+        buf.put(uint256(intent.getNonce()));
         buf.put(uint256(intent.getDeadline()));
-        buf.put(bytes32(intent.getRiskParams()));
+
         return keccak256(buf.array());
     }
 

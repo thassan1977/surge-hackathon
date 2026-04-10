@@ -19,6 +19,7 @@ import org.springframework.stereotype.Service;
 import org.web3j.crypto.Credentials;
 import org.web3j.crypto.Hash;
 import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.tx.gas.DefaultGasProvider;
 import org.web3j.utils.Numeric;
 
@@ -53,6 +54,9 @@ public class ValidationService {
 
     @Value("${validation.checkpoint.interval:10}")
     private int checkpointInterval;
+
+    @Value("${ai.pair:ETHUSD}")
+    private String PAIR;
 
     private final Map<String, TradeArtifact> artifactCache = new ConcurrentHashMap<>();
     private int tradesSinceCheckpoint = 0;
@@ -112,16 +116,21 @@ public class ValidationService {
                 .portfolioContext(buildPortfolioContext(intent))
 
                 .execution(TradeArtifact.ExecutionBlock.builder()
-                        .tokenIn(intent.getTokenIn())
-                        .tokenOut(intent.getTokenOut())
-                        .amountInRaw(intent.getAmountIn().toString())
-                        .amountInUsdc(intent.getAmountIn().doubleValue() / 1_000_000.0)
-                        .minAmountOut(intent.getMinAmountOut() != null
-                                ? intent.getMinAmountOut().toString() : "0")
+                        // Updated to match the live TradeIntent fields
+                        .pair(intent.getPair())               // e.g., "ETH/USDC"
+                        .action(intent.getAction())           // e.g., "BUY" or "SELL"
+                        .amountUsdScaled(intent.getAmountUsdScaled().toString())
+                        .amountInUsdc(intent.getAmountUsdScaled().doubleValue() / 1e18) // Adjust scale based on contract (usually 18 decimals)
+
+                        // Slippage replaced minAmountOut in the new logic
+                        .maxSlippageBps(intent.getMaxSlippageBps() != null
+                                ? intent.getMaxSlippageBps().intValue() : 100)
+
                         .deadline(intent.getDeadline() != null
                                 ? intent.getDeadline().longValue() : 0L)
                         .nonce(intent.getNonce() != null
                                 ? intent.getNonce().toString() : "0")
+
                         .eip712Signed(true)
                         .txHash(txHash)
                         .blockNumber(blockNumber)
@@ -129,7 +138,6 @@ public class ValidationService {
                         .takeProfitPrice(entryPriceUsd * decision.getTakeProfitMultiplier())
                         .stopLossPrice(entryPriceUsd * decision.getStopLossMultiplier())
                         .build())
-
                 // Open outcome — filled by finaliseOutcome()
                 .outcome(TradeArtifact.openOutcome())
 
@@ -271,9 +279,15 @@ public class ValidationService {
 
             String json  = objectMapper.writeValueAsString(checkpoint);
             byte[] hash  = Numeric.hexStringToByteArray(Hash.sha3String(json));
-            int    score = checkpoint.getTotalScore();
-            blockchainService.postValidation(agentId, hash, score);
-            postValidatorScore(agentId, score);
+            int score = checkpoint.getTotalScore();
+            String checkpointNotes = String.format("CP#%d: WR=%.1f%% Sharpe=%.2f Trades=%d",
+                    checkpoint.getIdentity().getCheckpointNumber(),
+                    performanceTracker.getWinRate() * 100,
+                    performanceTracker.getSharpeRatio(),
+                    performanceTracker.getTradeCount());
+            blockchainService.postValidation(agentId, hash, score, checkpointNotes);
+
+            postValidatorScore(agentId, score, checkpointNotes);
 
             log.info("Strategy checkpoint posted | #{} Sharpe={} WinRate={} Score={}/100",
                     checkpoint.getIdentity().getCheckpointNumber(),
@@ -295,7 +309,7 @@ public class ValidationService {
     private TradeArtifact.MarketSnapshot buildMarketSnapshot(MarketState m,
                                                              AITradeDecision decision) {
         if (m == null) return TradeArtifact.MarketSnapshot.builder()
-                .symbol("ETH/USDC")
+                .symbol(PAIR)
                 .marketRegime(decision.getMarketRegime().name())
                 .regimeConfidence(decision.getRegimeConfidence())
                 .build();
@@ -435,14 +449,23 @@ public class ValidationService {
     }
 
     private TradeArtifact.PortfolioContext buildPortfolioContext(TradeIntent intent) {
-        double vault     = riskService.getVaultBalanceUsdc();
-        double posUsdc   = intent.getAmountIn() != null
-                ? intent.getAmountIn().doubleValue() / 1_000_000.0 : 0.0;
-        double posPct    = vault > 0 ? posUsdc / vault : 0.0;
-        double winRate   = performanceTracker.getWinRate();
-        double q         = 1.0 - winRate;
-        double b         = riskService.getAvgRewardRiskRatio();
-        double kellyFull = b > 0 ? Math.max(0, (b * winRate - q) / b) : 0.0;
+        // 1. Get the current vault state
+        double vault = riskService.getVaultBalanceUsdc();
+
+        // 2. Fix: amountIn -> amountUsdScaled & 6-decimal -> 18-decimal scaling
+        // Hackathon standard is usually 1e18 for USD-denominated trade intents.
+        double posUsdc = (intent.getAmountUsdScaled() != null)
+                ? intent.getAmountUsdScaled().doubleValue() / 1e18 : 0.0;
+
+        double posPct = vault > 0 ? posUsdc / vault : 0.0;
+
+        // 3. Kelly Criterion calculation
+        double winRate = performanceTracker.getWinRate();
+        double q       = 1.0 - winRate;
+        double b       = riskService.getAvgRewardRiskRatio();
+
+        // Kelly % = (b*p - q) / b
+        double kellyFull = (b > 0) ? Math.max(0, (b * winRate - q) / b) : 0.0;
 
         return TradeArtifact.PortfolioContext.builder()
                 .vaultBalanceUsdc(vault)
@@ -450,10 +473,11 @@ public class ValidationService {
                 .positionSizePct(posPct)
                 .kellyFull(kellyFull)
                 .kellyHalf(kellyFull * 0.5)
+                // 4. Verification: Ensure these methods exist in your riskService/performanceTracker
                 .portfolioDrawdownPct(riskService.getCurrentDrawdownPct())
                 .peakBalanceUsdc(riskService.getPeakBalanceUsdc())
                 .openPositionsCount(riskService.getOpenPositionsCount())
-                .tradesToday(riskService.getTradesToday())
+                .tradesToday(riskService.getTradesToday()) // Ensure this isn't tradesSinceCheckpoint
                 .rollingWinRate(winRate)
                 .rollingSharpeRatio(performanceTracker.getSharpeRatio())
                 .cumulativePnlPct(performanceTracker.getCumulativePnlPct())
@@ -465,36 +489,69 @@ public class ValidationService {
     // ═════════════════════════════════════════════════════════════════════
 
     private byte[] hashAndPost(BigInteger agentId, TradeArtifact artifact) throws Exception {
-        String json  = objectMapper.writeValueAsString(artifact);
-        byte[] hash  = Numeric.hexStringToByteArray(Hash.sha3String(json));
-        int    score = artifact.getTotalScore();
-        // Both calls are non-fatal — validator registration lag must not block trades
-        blockchainService.postValidation(agentId, hash, score);
+        String json = objectMapper.writeValueAsString(artifact);
+        byte[] hash = Numeric.hexStringToByteArray(Hash.sha3String(json));
+        int score = artifact.getTotalScore();
+
+        // Extract reasoning for the on-chain attestation
+        String reasoning = artifact.getDecision().getJudgeReasoning();
+        if (reasoning == null || reasoning.isBlank()) {
+            reasoning = "Automated trade validation anchor.";
+        }
+
+        // Call blockchainService with the extra reasoning parameter
+        blockchainService.postValidation(agentId, hash, score, reasoning);
+
         try {
-            postValidatorScore(agentId, score);
+            postValidatorScore(agentId, score, reasoning);
         } catch (Exception e) {
             log.warn("postValidatorScore skipped (non-fatal): {}", e.getMessage());
         }
         return hash;
     }
-
     // ═════════════════════════════════════════════════════════════════════
     // VALIDATOR SCORE
     // ═════════════════════════════════════════════════════════════════════
 
-    private void postValidatorScore(BigInteger agentId, int score) {
+    public void postValidatorScore(BigInteger agentId, int score, String reasoning) {
         if (validatorPrivateKey == null || validatorPrivateKey.isBlank()) {
-            log.debug("agent.validator.privateKey not set — recordValidatorScore() skipped.");
+            log.debug("agent.validator.privateKey not set — feedback skipped.");
             return;
         }
         try {
             Credentials validatorCreds = Credentials.create(validatorPrivateKey);
             ReputationRegistry rep = ReputationRegistry.load(
                     contractConfig.getReputation(), web3j, validatorCreds, gasProvider);
-            rep.recordValidatorScore(agentId, BigInteger.valueOf(score)).send();
-            log.debug("recordValidatorScore | agentId={} score={}", agentId, score);
+
+            // 1. Check if already rated (to avoid revert)
+            boolean alreadyRated = rep.hasRated(agentId, validatorCreds.getAddress()).send();
+            if (alreadyRated) {
+                log.debug("Validator already submitted feedback for agent {}", agentId);
+                return;
+            }
+
+            // 2. Generate an outcome reference (anchor hash)
+            // Usually a keccak256 of the data you validated
+            byte[] outcomeRef = org.web3j.crypto.Hash.sha3(reasoning.getBytes(StandardCharsets.UTF_8));
+
+            log.info("Submitting Validator Feedback: Score={}, Agent={}", score, agentId);
+
+            // 3. Call the correct method from your wrapper
+            // Parameters: agentId, score, outcomeRef, comment, feedbackType
+            // FeedbackType.STRATEGY_QUALITY = 2
+            TransactionReceipt receipt = rep.submitFeedback(
+                    agentId,
+                    BigInteger.valueOf(score),
+                    outcomeRef,
+                    reasoning,
+                    BigInteger.valueOf(2)
+            ).send();
+
+            if (receipt.isStatusOK()) {
+                log.info("Validator feedback anchored! TX: {}", receipt.getTransactionHash());
+            }
         } catch (Exception e) {
-            log.warn("recordValidatorScore failed (validator not yet registered?): {}", e.getMessage());
+            log.error("Failed to submit validator feedback: {}", e.getMessage());
         }
     }
 
@@ -524,40 +581,54 @@ public class ValidationService {
      * Anchors a 'Near Miss' or 'Hold' decision to the blockchain/registry.
      * This proves Drawdown Control to the judges.
      */
+    private double computeKellyFraction(double confidence, double takeProfitPct, double stopLossPct) {
+        double b        = stopLossPct > 0 ? takeProfitPct / stopLossPct : 2.0;
+        double q        = 1.0 - confidence;
+        double fStar    = (b * confidence - q) / b;
+        double halfKelly = Math.max(0.0, fStar * 0.5);
+        return Math.min(halfKelly, 0.05); // hard cap: never risk more than 5% per trade
+    }
     public void postVetoArtifact(AITradeDecision decision, MarketState mkt, String reason) {
         try {
-            // Calculate what the size WOULD have been using your risk service
-            // We use the vault balance and AI confidence to recreate the 'intended' size
+            BigInteger agentId = identityService.getAgentId();
             double vaultBalance = riskService.getVaultBalanceUsdc();
 
-            // Re-calculating the dollar amount for the log/fingerprint
-            // If your riskService returns BigInteger, convert it to double for the String.format
-            double intendedSizeUsdc = riskService.calculateSafePositionSize(
+            // 1. Scaled balance for the risk service (18 decimals for Live Hackathon)
+            // Using BigDecimal to avoid overflow/precision issues before converting to BigInteger
+
+            // 2. Calculate intended size using the risk service
+            // ensure calculateSafePositionSize exists and accepts these params
+            BigInteger intendedSizeUsd = riskService.calculateSafePositionSizeUsd(
                     decision.getConfidence(),
-                    java.math.BigInteger.valueOf((long) (vaultBalance * 1_000_000)),
+                    vaultBalance,
                     decision.getTakeProfitPct(),
                     decision.getStopLossPct()
-            ).doubleValue() / 1_000_000.0;
+            );
 
+
+
+            // 3. Create the payload for the Hash
             String vetoPayload = String.format("VETO|%s|%s|P:%.2f|CONF:%.2f|SIZE:%.2f|REASON:%s",
                     mkt.getSymbol(),
                     decision.getAction(),
                     mkt.getCurrentPrice().doubleValue(),
                     decision.getConfidence(),
-                    intendedSizeUsdc,
+                    intendedSizeUsd.doubleValue(),
                     reason);
 
             byte[] artifactHash = Hash.sha3(vetoPayload.getBytes(StandardCharsets.UTF_8));
 
-            // Anchor to chain
+            // 4. Anchor to chain with the reasoning string (Required by your new Registry)
+            // Score is set to 50 for Vetoes/Near-Misses as a default
             blockchainService.postValidation(
-                    identityService.getAgentId(),
+                    agentId,
                     artifactHash,
-                    50
+                    50,
+                    "VETO: " + reason // This populates the 'notes' field on-chain
             );
 
-            log.info("Veto Anchored: {} | Intended Size: ${} | Reason: {}",
-                    mkt.getSymbol(), String.format("%.2f", intendedSizeUsdc), reason);
+            log.info("Veto Anchored | Agent: {} | Symbol: {} | Size: ${} | Reason: {}",
+                    agentId, mkt.getSymbol(), String.format("%.2f", intendedSizeUsd), reason);
 
         } catch (Exception e) {
             log.error("Failed to anchor Veto artifact: {}", e.getMessage());
@@ -569,9 +640,19 @@ public class ValidationService {
     }
 
     private double computeKellySizePct(TradeIntent intent) {
+        // 1. Use the dollar-denominated balance from your risk service
         double vault = riskService.getVaultBalanceUsdc();
-        if (vault <= 0 || intent.getAmountIn() == null) return 0.0;
-        return (intent.getAmountIn().doubleValue() / 1_000_000.0) / vault;
+
+        // 2. Update field to amountUsdScaled and check for null
+        if (vault <= 0 || intent.getAmountUsdScaled() == null) {
+            return 0.0;
+        }
+
+        // 3. Convert 18-decimal BigInteger to double and divide by 1e18
+        double intendedPositionUsdc = intent.getAmountUsdScaled().doubleValue() / 1e18;
+
+        // 4. Return the percentage (e.g., 0.05 for a 5% position)
+        return intendedPositionUsdc / vault;
     }
 
     private String fearGreedLabel(int index) {

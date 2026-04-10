@@ -1,6 +1,7 @@
 package com.surge.agent.services;
 
 import com.surge.agent.config.ContractConfig;
+import com.surge.agent.contracts.HackathonVault;
 import com.surge.agent.contracts.IdentityRegistry;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -53,6 +54,19 @@ public class IdentityService {
                 // This ensures you didn't accidentally register one ID but are trying to use another
                 if (agentId.intValue() != storedAgentId) {
                     log.warn("Warning: Blockchain says ID is {}, but you expected {}", agentId, storedAgentId);
+                }
+
+                try {
+                    HackathonVault vault = HackathonVault.load(contractConfig.getVault(), web3j, credentials, gasProvider);
+                    BigInteger vaultBalance = vault.getBalance(agentId).send();
+
+                    if (vaultBalance.equals(BigInteger.ZERO)) {
+                        log.info("Vault balance is 0. Claiming 0.05 ETH Sandbox allocation...");
+                        vault.claimAllocation(agentId).send();
+                        log.info("Allocation claimed successfully!");
+                    }
+                } catch (Exception e) {
+                    log.warn("Could not claim allocation (might already be claimed): {}", e.getMessage());
                 }
             } else {
                 this.agentId = null;
@@ -113,5 +127,9 @@ public class IdentityService {
                 credentials,
                 gasProvider
         );
+    }
+
+    public String getAgentWallet() {
+        return credentials.getAddress();
     }
 }

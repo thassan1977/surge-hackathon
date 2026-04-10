@@ -13,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.web3j.crypto.Credentials;
 import org.web3j.crypto.Hash;
 
 import java.math.BigDecimal;
@@ -35,6 +36,7 @@ public class TradeService {
     private final RiskManagementService riskService;
     private final EIP712Signer eip712Signer;
     private final NewsAggregator newsAggregator;
+    private final Credentials credentials;
 
     @Value("${contract.usdc}")
     private String usdcAddress;
@@ -47,6 +49,10 @@ public class TradeService {
 
     @Value("${trade.service.allowed_time}")
     private Long tradeAllowedTime;
+
+    @Value("${ai.pair}")
+    private String PAIR;
+
     /**
      * Entry point for incoming trade signals.
      */
@@ -112,58 +118,77 @@ public class TradeService {
         }
     }
 
+
     /**
-     * ERC-8004 Step 3 Compliant Execution
+     * ERC-8004 Step 3 Compliant Execution — Updated for Live Hackathon
      */
+    private double computeKellyFraction(double confidence, double takeProfitPct, double stopLossPct) {
+        double b        = stopLossPct > 0 ? takeProfitPct / stopLossPct : 2.0;
+        double q        = 1.0 - confidence;
+        double fStar    = (b * confidence - q) / b;
+        double halfKelly = Math.max(0.0, fStar * 0.5);
+        return Math.min(halfKelly, 0.05); // hard cap: never risk more than 5% per trade
+    }
     private void executeAutonomousTrade(AITradeDecision decision, MarketState mkt) throws Exception {
         BigInteger agentId = identityService.getAgentId();
-        String tradeId = validationService.resolveTradeId(decision);
         double currentPrice = mkt.getCurrentPrice().doubleValue();
 
-        // 1. Calculate Amount (Kelly Criterion)
-        BigInteger amountIn = riskService.calculateSafePositionSize(
+        // 1. Calculate Amount with 18-decimal scaling
+        // We convert the vault double (e.g. 1500.50) to a scaled BigInteger (10^18)
+        double balanceUsd  = riskService.getVaultBalanceUsdc();
+        double kellyFrac   = computeKellyFraction(
                 decision.getConfidence(),
-                BigInteger.valueOf((long) riskService.getVaultBalanceUsdc()),
                 decision.getTakeProfitPct(),
-                decision.getStopLossPct()
-        );
+                decision.getStopLossPct());
+        double betUsd      = balanceUsd * kellyFrac;
 
-        if (amountIn.compareTo(BigInteger.ZERO) <= 0) {
-            log.warn("Kelly size 0. Aborting.");
+        if (betUsd < 1.0) {
+            log.warn("Position too small: ${:.2f} — skipping.", betUsd);
             return;
         }
 
-        // 2. Slippage & Risk Packing (The "Step 3" Fix)
-        BigInteger minAmountOut = computeMinAmountOut(amountIn, mkt);
-        byte[] packedRisk = packRiskParams(decision); // Contract-readable bytes
+        // amountUsdScaled = USD * 100  (e.g. $10.29 → 1029)
+        // capped at RiskRouter max $500 = 50000
+        BigInteger amountUsdScaled = BigInteger.valueOf((long)(betUsd * 100))
+                .min(BigInteger.valueOf(50_000));
 
-        // 3. Build & Sign Intent
+        // 2. Slippage Management (Basis Points for the live router)
+        int slippageBps = computeSlippageBps(mkt);
+
+        // 3. Build & Sign Intent (Pair-based schema)
         TradeIntent intent = TradeIntent.builder()
                 .agentId(agentId)
-                .tokenIn(usdcAddress)
-                .tokenOut(wethAddress)
-                .amountIn(amountIn)
-                .minAmountOut(minAmountOut)
+                .agentWallet(credentials.getAddress())
+                .pair(PAIR)
+                .action(decision.getAction().name())
+                .amountUsdScaled(amountUsdScaled)
+                .maxSlippageBps(BigInteger.valueOf(slippageBps))
+                .nonce(BigInteger.valueOf(System.currentTimeMillis()))
                 .deadline(BigInteger.valueOf(Instant.now().getEpochSecond() + 600))
-                .riskParams(packedRisk)
                 .build();
 
         byte[] signature = eip712Signer.signTradeIntent(intent);
 
-        // 4. On-chain submission
+        // 4. On-chain submission & Receipt Handling
+        // Note: If your BlockchainService uses a wrapper like Web3j, it returns a TransactionReceipt
         var receipt = blockchainService.executeTrade(intent, signature);
-        String txHash = receipt.getTransactionHash();
-        Long blockNumber = receipt.getBlockNumber() != null ? receipt.getBlockNumber().longValue() : null;
 
-        //  Check if the transaction actually succeeded before tracking it as an open position
-        if (!receipt.isStatusOK()) {
-            log.error("Trade {} reverted on-chain. Posting failure artifact.", txHash);
+        // Safety check: ensure we handle null receipts or missing methods
+        String txHash = (receipt != null) ? receipt.getTransactionHash() : "0x_failed";
+        Long blockNumber = (receipt != null && receipt.getBlockNumber() != null)
+                ? receipt.getBlockNumber().longValue() : 0L;
 
-            // Post artifact: judges see the attempt, no register the artifact
+        // Check transaction status: "0x1" is success in EVM
+        boolean success = receipt != null && "0x1".equals(receipt.getStatus());
+
+        if (!success) {
+            log.error("Trade transaction REVERTED on-chain. Hash: {}", txHash);
+            // Still post the artifact so judges see the attempt and the AI's reasoning
             validationService.postTradeArtifact(intent, null, decision, mkt, currentPrice, txHash, blockNumber);
-            return; // do not increment counters or monitor a failed trade.
+            return;
         }
-        // 5. Artifact & Monitoring
+
+        // 5. Artifact & Monitoring (Success path)
         postTradeLogging(intent, decision, mkt, txHash, blockNumber);
     }
 
@@ -182,6 +207,21 @@ public class TradeService {
         riskService.incrementTradeCount();
 
         log.info("Successfully executed trade {}. Tx: {}", tradeId, txHash);
+    }
+
+
+
+    private int computeSlippageBps(MarketState mkt) {
+        double price = mkt.getCurrentPrice().doubleValue();
+        // ATR % represents how much the price typically moves in a single bar
+        double atrPct = price > 0 ? (mkt.getAtr() / price) : 0;
+
+        // We scale the slippage to be 1.5x the current volatility (ATR)
+        // capped between 0.5% (50 bps) and 3.0% (300 bps)
+        double slippage = Math.min(0.03, Math.max(0.005, atrPct * 1.5));
+
+        // Convert decimal (0.01) to Basis Points (100)
+        return (int) (slippage * 10000);
     }
 
     private byte[] packRiskParams(AITradeDecision decision) {
