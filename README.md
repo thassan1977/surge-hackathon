@@ -69,7 +69,8 @@ A Sepolia RPC Provider (Infura/Alchemy)
 Configuration
 Update src/main/resources/application.properties:
 
-📊 Contract Integration (Sepolia)
+## 📊 Contract Integration (Sepolia)
+
 contract.identity=0x97b07dDc405B0c28B17559aFFE63BdB3632d0ca3
 contract.vault=0x0E7CD8ef9743FEcf94f9103033a044caBD45fC90
 contract.router=0xd6A6952545FF6E6E6681c2d15C59f9EB8F40FdBC
