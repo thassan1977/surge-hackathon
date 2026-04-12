@@ -1,6 +1,9 @@
 package com.surge.agent.dto;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.surge.agent.enums.MarketRegime;
 import com.surge.agent.enums.TradeAction;
 import com.surge.agent.model.TradeIntent;
@@ -20,43 +23,41 @@ import java.math.RoundingMode;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonIgnoreProperties(ignoreUnknown = true)
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class TradeRecord {
 
-    private String     tradeId;
+    private String tradeId;
+
+    // BigInteger serialization: Jackson handles it as a number or string
+    // We'll use a custom serializer to store as decimal string for readability
+    @JsonSerialize(using = BigIntegerSerializer.class)
+    @JsonDeserialize(using = BigIntegerDeserializer.class)
     private BigInteger agentId;
 
-    // ── Updated Trade parameters for Live Hackathon ──────────────────────
-
     private TradeAction action;
-    private String      pair;   // Added: e.g., "ETH/USDC"
+    private String      pair;   // e.g., "ETH/USDC"
 
     private double entryPrice;
-    private double positionSizeEth;  // Used for tracking on-chain inventory
-    private double positionSizeUsdc; // Real dollar value for PnL
+    private double positionSizeEth;   // ETH amount (for inventory tracking)
+    private double positionSizeUsdc;  // USD value at entry
     private double takeProfitPrice;
     private double stopLossPrice;
 
-    // tokenIn/tokenOut are now deprecated in favor of 'pair'
     @Deprecated private String tokenIn;
     @Deprecated private String tokenOut;
 
-    // ── Timing ───────────────────────────────────────────────────────────
     private long openedAtEpoch;
     private long closedAtEpoch;
-
-    // ── State ────────────────────────────────────────────────────────────
     private boolean closed;
 
-    // ── On-chain linkage ─────────────────────────────────────────────────
     private String executionTxHash;
     private String closeTxHash;
 
-    // ── AI context ───────────────────────────────────────────────────────
     private MarketRegime marketRegime;
     private List<AgentVerdict> agentVerdicts;
 
     // ─────────────────────────────────────────────────────────────────────
-    // UPDATED FACTORY
+    // FACTORY METHODS
     // ─────────────────────────────────────────────────────────────────────
 
     public static TradeRecord fromDecision(String tradeId,
@@ -69,10 +70,9 @@ public class TradeRecord {
                 .tradeId(tradeId)
                 .agentId(agentId)
                 .action(decision.getAction())
-                .pair(intent.getPair()) // Logic updated to use Pair
+                .pair(intent.getPair())
                 .entryPrice(currentPrice)
-                // Use the new intent field: amountUsdScaled (18 decimals)
-                .positionSizeEth(weiToEth(intent.getAmountUsdScaled()))
+                .positionSizeEth(weiToEth(intent.getAmountUsdScaled())) // if needed
                 .positionSizeUsdc(positionSizeUsdc)
                 .takeProfitPrice(currentPrice * decision.getTakeProfitMultiplier())
                 .stopLossPrice(currentPrice * decision.getStopLossMultiplier())
@@ -84,14 +84,11 @@ public class TradeRecord {
                 .build();
     }
 
-    /** * FIX: Updated scaling from 1e6 to 1e18 for the live hackathon.
-     */
     public static TradeRecord fromDecision(String tradeId,
                                            BigInteger agentId,
                                            double currentPrice,
                                            TradeIntent intent,
                                            AITradeDecision decision) {
-        // Updated scaling to 1e18 for amountUsdScaled
         double usdc = intent.getAmountUsdScaled() != null
                 ? intent.getAmountUsdScaled().doubleValue() / 1e18 : 0.0;
         return fromDecision(tradeId, agentId, currentPrice, usdc, intent, decision);
@@ -105,7 +102,7 @@ public class TradeRecord {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // LOGIC METHODS (Unchanged as they rely on doubles)
+    // LOGIC METHODS
     // ─────────────────────────────────────────────────────────────────────
 
     public boolean isAtTakeProfit(double currentPrice) {
@@ -124,7 +121,7 @@ public class TradeRecord {
         if (entryPrice <= 0) return 0.0;
         return TradeAction.SELL.equals(action)
                 ? (entryPrice - exitPrice) / entryPrice
-                : (exitPrice  - entryPrice) / entryPrice;
+                : (exitPrice - entryPrice) / entryPrice;
     }
 
     public double calculatePnlUsdc(double exitPrice) {
@@ -134,5 +131,25 @@ public class TradeRecord {
     public long getHoldDurationSeconds() {
         long closeEpoch = closedAtEpoch > 0 ? closedAtEpoch : Instant.now().getEpochSecond();
         return closeEpoch - openedAtEpoch;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // CUSTOM SERIALIZERS FOR BigInteger (to store as decimal string)
+    // ─────────────────────────────────────────────────────────────────────
+
+    public static class BigIntegerSerializer extends com.fasterxml.jackson.databind.JsonSerializer<BigInteger> {
+        @Override
+        public void serialize(BigInteger value, com.fasterxml.jackson.core.JsonGenerator gen,
+                              com.fasterxml.jackson.databind.SerializerProvider serializers) throws java.io.IOException {
+            gen.writeString(value.toString());
+        }
+    }
+
+    public static class BigIntegerDeserializer extends com.fasterxml.jackson.databind.JsonDeserializer<BigInteger> {
+        @Override
+        public BigInteger deserialize(com.fasterxml.jackson.core.JsonParser p,
+                                      com.fasterxml.jackson.databind.DeserializationContext ctxt) throws java.io.IOException {
+            return new BigInteger(p.getText());
+        }
     }
 }

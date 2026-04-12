@@ -1,6 +1,5 @@
 package com.surge.agent.services;
 
-import com.surge.agent.dto.MarketState;
 import com.surge.agent.dto.TradeRecord;
 import com.surge.agent.dto.artifact.TradeOutcomeRecord;
 import com.surge.agent.dto.request.TradeFeedbackRequest;
@@ -8,9 +7,12 @@ import com.surge.agent.enums.TradeAction;
 import com.surge.agent.services.market.MarketDataService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -19,20 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * TradeMonitorService — V3 full implementation.
- *
- * Responsibilities:
- *   1. Holds all open TradeRecords in a thread-safe map.
- *   2. Every 5 seconds, checks each open trade against the current price.
- *   3. When TP or SL is hit, builds a TradeOutcomeRecord and calls:
- *        - ValidationService.finaliseOutcome()  → re-scores and re-posts artifact
- *        - PythonAIClient.sendTradeFeedback()   → ChromaDB + agent weight update
- *        - RiskManagementService.recordTrade()  → drawdown + Sharpe tracking
- *
- * Thread safety:
- *   - openTrades is a ConcurrentHashMap — safe for concurrent reads from the
- *     @Scheduled monitor and writes from TradeService.
- *   - closeTrade() removes from the map before calling out, preventing double-close.
+ * TradeMonitorService — V4 with Redis persistence + on-chain close.
  */
 @Slf4j
 @Service
@@ -40,48 +29,60 @@ import java.util.stream.Collectors;
 public class TradeMonitorService {
 
     private final MarketDataService marketDataService;
-    private final ValidationService     validationService;
-    private final PythonAIClient        pythonAIClient;
+    private final ValidationService validationService;
+    private final PythonAIClient pythonAIClient;
     private final RiskManagementService riskService;
+    private final OpenPositionStore openPositionStore;          // NEW: Redis store
+    private final PositionCloserService positionCloserService;   // NEW: to close on-chain
 
-    /** tradeId → open TradeRecord */
+    /** tradeId → open TradeRecord (in‑memory cache) */
     private final ConcurrentHashMap<String, TradeRecord> openTrades = new ConcurrentHashMap<>();
 
     // ─────────────────────────────────────────────────────────────────────
-    // REGISTRATION
+    // INIT: Load from Redis on startup
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * Called by TradeService after a trade executes on-chain.
-     * Starts monitoring from this point forward.
-     */
-    public void register(TradeRecord record) {
-        openTrades.put(record.getTradeId(), record);
-        log.info("Position registered | tradeId={} action={} entry={} TP={} SL={}",
-                record.getTradeId(), record.getAction(),
-                record.getEntryPrice(), record.getTakeProfitPrice(), record.getStopLossPrice());
+    @PostConstruct
+    public void init() {
+        List<TradeRecord> saved = openPositionStore.loadAll();
+        for (TradeRecord record : saved) {
+            if (!record.isClosed()) {
+                openTrades.put(record.getTradeId(), record);
+                log.info("Restored open trade {} from Redis", record.getTradeId());
+            } else {
+                // Should not happen, but clean up
+                openPositionStore.delete(record.getTradeId());
+            }
+        }
+        log.info("TradeMonitorService initialised. {} open positions loaded.", openTrades.size());
     }
 
-    /** Returns a snapshot of all currently open trades (read-only). */
+    // ─────────────────────────────────────────────────────────────────────
+    // REGISTRATION (persist to Redis)
+    // ─────────────────────────────────────────────────────────────────────
+
+    public void register(TradeRecord record) {
+        openTrades.put(record.getTradeId(), record);
+        openPositionStore.save(record.getTradeId(), record);
+        log.info("Position registered | tradeId={} action={} entry={} TP={} SL={} size=${}",
+                record.getTradeId(), record.getAction(),
+                record.getEntryPrice(), record.getTakeProfitPrice(), record.getStopLossPrice(),
+                record.getPositionSizeUsdc());
+    }
+
     public Collection<TradeRecord> getOpenTrades() {
         return List.copyOf(openTrades.values());
     }
 
-    /** Count of open positions — used by RiskManagementService guards. */
     public int getOpenCount() {
         return openTrades.size();
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // PRICE MONITOR (runs every 5 seconds)
+    // PRICE MONITOR (every 500ms)
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * Scheduled price tick monitor.
-     * Checks every open trade against the current market price.
-     * Closes any trade whose TP or SL level has been breached.
-     */
-    @Scheduled(fixedDelay = 5_000)
+    @Scheduled(fixedDelay = 500)
     public void monitorPositions() {
         if (openTrades.isEmpty()) return;
 
@@ -91,7 +92,6 @@ public class TradeMonitorService {
             return;
         }
 
-        // Snapshot keys to avoid ConcurrentModificationException during iteration
         new ArrayList<>(openTrades.keySet()).forEach(tradeId -> {
             TradeRecord trade = openTrades.get(tradeId);
             if (trade != null && !trade.isClosed()) {
@@ -106,41 +106,61 @@ public class TradeMonitorService {
         if (TradeAction.BUY.equals(trade.getAction())) {
             tpHit = price >= trade.getTakeProfitPrice();
             slHit = price <= trade.getStopLossPrice();
-        } else {
-            // SELL (short): TP when price falls, SL when price rises
+        } else { // SELL (short)
             tpHit = price <= trade.getTakeProfitPrice();
             slHit = price >= trade.getStopLossPrice();
         }
 
         if (tpHit) {
-            closeTrade(trade, price, "TP");
+            closeTrade(trade, trade.getTakeProfitPrice(), "TP");
         } else if (slHit) {
-            closeTrade(trade, price, "SL");
+            closeTrade(trade, trade.getStopLossPrice(), "SL");
+        } else {
+            long maxHoldSeconds = 1800; // 1/2 hour
+            if (Instant.now().getEpochSecond() - trade.getOpenedAtEpoch() > maxHoldSeconds) {
+                closeTrade(trade, getCurrentPrice(), "TIMEOUT");
+            }
         }
+
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // CLOSE TRADE
+    // CLOSE TRADE (with on‑chain SELL)
     // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * Closes a trade, fires all downstream update hooks, and removes it from
-     * the open trades map.
-     *
-     * Can also be called manually (e.g. from an admin endpoint or circuit breaker).
+     * Closes a trade: removes from local cache + Redis, submits SELL intent on‑chain,
+     * then updates local stats, validation, and Python feedback.
      */
     public void closeTrade(TradeRecord trade, double exitPrice, String reason) {
-        // Remove first — prevents double-close if two ticks fire simultaneously
+        // 1. Remove from local map and Redis immediately to prevent double‑close
         TradeRecord removed = openTrades.remove(trade.getTradeId());
-        if (removed == null) return; // already closed by a concurrent tick
+        if (removed == null) return; // already closed
+        openPositionStore.delete(trade.getTradeId());
 
+        // 2. Submit SELL intent on‑chain (critical for leaderboard)
+        boolean onChainClosed = false;
+        try {
+            positionCloserService.closePosition(trade, exitPrice, reason);
+            onChainClosed = true;
+            log.info("On-chain SELL submitted for trade {} at price {} (reason: {})",
+                    trade.getTradeId(), exitPrice, reason);
+        } catch (Exception e) {
+            log.error("On-chain close failed for trade {}: {}", trade.getTradeId(), e.getMessage());
+            // Re‑add to cache and Redis so we retry later
+            openTrades.put(trade.getTradeId(), trade);
+            openPositionStore.save(trade.getTradeId(), trade);
+            return;
+        }
+
+        // 3. Mark as closed and compute outcome
         trade.setClosed(true);
         trade.setClosedAtEpoch(Instant.now().getEpochSecond());
 
-
-        double pnlPct  = trade.calculatePnl(exitPrice);
+        double pnlPct = trade.calculatePnl(exitPrice);
         double pnlUsdc = trade.calculatePnlUsdc(exitPrice);
-        long   holdSec = trade.getHoldDurationSeconds();
+        long holdSec = trade.getHoldDurationSeconds();
+        double updatedBalance = riskService.getCurrentEquityUsdc() + pnlUsdc;
 
         TradeOutcomeRecord outcome = TradeOutcomeRecord.builder()
                 .tradeId(trade.getTradeId())
@@ -150,20 +170,21 @@ public class TradeMonitorService {
                 .realisedPnlPct(pnlPct)
                 .realisedPnlUsdc(pnlUsdc)
                 .holdDurationSeconds(holdSec)
-                .closeTxHash(null)  // on-chain settlement tx not available here
+                .closeTxHash(null) // We don't have the SELL tx hash here; could be passed from orchestrator
                 .build();
 
         log.info("Position closed | tradeId={} reason={} entry={} exit={} pnl={}% hold={}s",
-                trade.getTradeId(), reason, trade.getEntryPrice(), exitPrice, pnlPct, holdSec);
+                trade.getTradeId(), reason, trade.getEntryPrice(), exitPrice,
+                String.format("%.2f", pnlPct * 100), holdSec);
 
-        // ── 1. Re-score and re-post validation artifact with outcome ───────
+        // 4. Post final validation artifact (with outcome)
         try {
             validationService.finaliseOutcome(outcome, trade);
         } catch (Exception e) {
             log.error("finaliseOutcome failed for tradeId={}: {}", trade.getTradeId(), e.getMessage());
         }
 
-        // ── 2. Send feedback to Python for ChromaDB + agent weight update ──
+        // 5. Send feedback to Python for agent weight update
         try {
             pythonAIClient.sendTradeFeedback(buildFeedbackRequest(trade, outcome));
         } catch (Exception e) {
@@ -171,17 +192,16 @@ public class TradeMonitorService {
                     trade.getTradeId(), e.getMessage());
         }
 
-        // ── 3. Update rolling risk metrics (drawdown, Sharpe window) ──────
+        // 6. Update local rolling risk metrics (Sharpe, win rate, etc.)
         try {
-            riskService.recordTradeReturn(pnlPct, riskService.getCurrentEquityUsdc());
+            riskService.recordTradeReturn(pnlPct, updatedBalance);
         } catch (Exception e) {
             log.warn("recordTradeReturn failed for tradeId={}: {}", trade.getTradeId(), e.getMessage());
         }
     }
 
     /**
-     * Force-closes all open positions (called by circuit breaker or admin endpoint).
-     * Uses the current market price and "REVERT" as the exit reason.
+     * Force‑close all open positions (circuit breaker or shutdown).
      */
     public void closeAllPositions() {
         if (openTrades.isEmpty()) return;
@@ -191,18 +211,12 @@ public class TradeMonitorService {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // FEEDBACK REQUEST BUILDER
+    // FEEDBACK REQUEST BUILDER (unchanged)
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * Builds the TradeFeedbackRequest for Python.
-     * Includes slim agent verdicts (name + signal + conviction only) so Python
-     * can update per-agent win-rate attribution in AgentPerformanceTracker.
-     */
     private TradeFeedbackRequest buildFeedbackRequest(TradeRecord trade,
                                                       TradeOutcomeRecord outcome) {
         List<TradeFeedbackRequest.AgentVerdictSlim> slimVerdicts = null;
-
         if (trade.getAgentVerdicts() != null) {
             slimVerdicts = trade.getAgentVerdicts().stream()
                     .map(v -> TradeFeedbackRequest.AgentVerdictSlim.builder()
@@ -212,7 +226,6 @@ public class TradeMonitorService {
                             .build())
                     .collect(Collectors.toList());
         }
-
         return TradeFeedbackRequest.builder()
                 .tradeId(trade.getTradeId())
                 .pnl(outcome.getRealisedPnlPct())
@@ -224,11 +237,14 @@ public class TradeMonitorService {
 
     private double getCurrentPrice() {
         try {
-            MarketState mkt = marketDataService.getLatestMarketState();
-            return mkt != null && mkt.getCurrentPrice() != null
-                    ? mkt.getCurrentPrice().doubleValue() : 0.0;
+            BigDecimal rawPrice = marketDataService.getLatestPrice();
+            if (rawPrice == null || rawPrice.compareTo(BigDecimal.ZERO) <= 0) {
+                log.warn("Monitor: Raw price is 0 or null. Waiting for next tick.");
+                return 0.0;
+            }
+            return rawPrice.doubleValue();
         } catch (Exception e) {
-            log.debug("Could not fetch current price: {}", e.getMessage());
+            log.error("Monitor: Error fetching raw price: {}", e.getMessage());
             return 0.0;
         }
     }

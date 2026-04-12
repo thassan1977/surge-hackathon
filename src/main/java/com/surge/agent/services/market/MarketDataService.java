@@ -21,6 +21,7 @@ import java.math.RoundingMode;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * MarketDataService — V4
@@ -79,7 +80,7 @@ public class MarketDataService {
     // ── Microstructure state ──────────────────────────────────────────────────
     private BigDecimal latestBidQty  = BigDecimal.ZERO;
     private BigDecimal latestAskQty  = BigDecimal.ZERO;
-    private BigDecimal latestPrice   = BigDecimal.ZERO;
+    private final AtomicReference<BigDecimal> latestPrice = new AtomicReference<>(BigDecimal.ZERO);
     private BigDecimal latestBid     = BigDecimal.ZERO;
     private BigDecimal latestAsk     = BigDecimal.ZERO;
 
@@ -157,7 +158,7 @@ public class MarketDataService {
                                BigDecimal askQty) {
 
         // This allows getUnifiedState() to grab the real tick price
-        this.latestPrice  = midPrice;
+        this.latestPrice.set(midPrice);
 
 
         // Internal bar-closing and indicator logic needs protection.
@@ -230,7 +231,7 @@ public class MarketDataService {
                                           BigDecimal price,
                                           BigDecimal qty,
                                           boolean isBuyerMaker) {
-        this.latestPrice = price;
+        this.latestPrice.set(price);
         synchronized (this) {
             double amount = qty.doubleValue();
             double priceD = price.doubleValue();
@@ -326,12 +327,18 @@ public class MarketDataService {
 
         // ── THE TICK PRICE ──
         // Use the volatile/atomic latestPrice immediately.
-        double tickPrice = latestPrice.doubleValue();
+        double tickPrice = latestPrice.get().doubleValue();
+        // guard zero price
+        if (tickPrice <= 0) {
+            log.warn("Latest price is 0.0, skipping state build for {}", symbol);
+            return null;
+        }
+
         MarketState state = new MarketState();
 
         // ── Identity ──────────────────────────────────────────────────────────
         state.setSymbol(symbol);
-        state.setCurrentPrice(latestPrice); // This is the live tick
+        state.setCurrentPrice(latestPrice.get()); // This is the live tick
         state.setBarCount(barCount);
 
         // ── L2 Order Book ─────────────────────────────────────────────────────
@@ -558,5 +565,9 @@ public class MarketDataService {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    public BigDecimal getLatestPrice() {
+        return latestPrice.get();
     }
 }

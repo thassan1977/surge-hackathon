@@ -11,6 +11,7 @@ import com.surge.agent.services.news.NewsAggregator;
 import com.surge.agent.utils.EIP712Signer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.web3j.crypto.Credentials;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
@@ -27,43 +28,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * AutonomousTradingOrchestrator — Production Grade for ERC-8004 Hackathon
- *
- * All fixes applied vs original:
- *
- * [FIX 1] getVaultBalance() — was calling HackathonVault.getBalance() which
- *         returns ETH wei (0.001 ETH = 1e15). Used as USDC → $1B notional.
- *         Now reads actual USDC ERC-20 balance from agent wallet.
- *
- * [FIX 2] getWethBalance() — same bug. Vault has no WETH.
- *         Now reads actual WETH ERC-20 balance from agent wallet.
- *
- * [FIX 3] refreshRiskState() — was feeding ETH wei to Python as balanceUsdc.
- *         Now uses real USDC wallet balance in 6-decimal raw units.
- *
- * [FIX 4] amountUsdScaled cap — RiskRouter enforces max $500/trade = 50000 scaled.
- *         Without cap, larger intents are rejected on-chain (wasted gas).
- *
- * [FIX 5] pair string — changed from "ETHUSD" to "XBTUSD" as shown in docs.
- *         Add simulateIntent() call to detect pair rejections before submitting.
- *
- * [FIX 6] simulateIntent() dry-run — added before every submitTradeIntent().
- *         If Router would reject, we abort and save gas.
- *
- * [FIX 7] Trade rate limiter — RiskRouter allows max 10 trades/hour on-chain.
- *         Added local AtomicInteger counter + 1-hour reset to avoid hitting the limit.
- *
- * [FIX 8] SELL guard — now checks actual WETH balance (> 0) before proceeding.
- *         Old code always attempted SELL because vault ETH was always > 0.
- *
- * [UNCHANGED] TradeIntent struct fields — already matched spec.
- * [UNCHANGED] amountUsdScaled conversion formula — already correct.
- * [UNCHANGED] EIP-712 signing — delegated to EIP712Signer (verify domain there).
- * [UNCHANGED] Python AI decision logic — not touched.
- * [UNCHANGED] shouldTriggerAnalysis() — correct.
- * [UNCHANGED] computeSlippageBps() — correct.
- */
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -82,6 +47,7 @@ public class AutonomousTradingOrchestrator {
     private final Credentials           credentials;
     private final Web3j                 web3j;
     private final ValidationCheckpointService checkpointService;
+    private final @Lazy TradeMonitorService tradeMonitorService;
 
     @Value("${contract.weth}")
     private String WETH_ADDRESS;
@@ -169,7 +135,7 @@ public class AutonomousTradingOrchestrator {
                     newsAggregator.getAINewsContext(),
                     riskService.getCurrentDrawdownPct(),
                     riskService.getOpenPositionsCount(),
-                    riskService.getVaultBalanceUsdc() // This must be ~108.0, not ~2.17
+                    riskService.getVaultBalanceUsdc()
             );
             lastAnalyzedPrice       = marketState.getCurrentPrice();
             lastAnalysisTimestampMs = System.currentTimeMillis();
@@ -279,15 +245,32 @@ public class AutonomousTradingOrchestrator {
         boolean approved = receipt.getLogs().stream()
                 .anyMatch(l -> l.getTopics().get(0).contains("536c9b7d")); // TradeApproved topic
 
-        tradesThisHour.incrementAndGet();
-        riskService.onPositionOpened();
-        riskService.incrementTradeCount();
-
-
         // check point for validation
         checkpointService.postCheckpoint(intent, decision, marketState, approved,
                 receipt.getTransactionHash());
 
+        if (approved) {
+
+            tradesThisHour.incrementAndGet();
+            riskService.onPositionOpened();
+            riskService.incrementTradeCount();
+
+            double actualEthPrice = marketState.getCurrentPrice().doubleValue();
+
+            double positionUsdc = intent.getAmountUsdScaled().doubleValue() / 100.0;  // cents → dollars
+
+            TradeRecord record = TradeRecord.fromDecision(
+                    decision.getTradeId(),
+                    agentId,
+                    actualEthPrice,
+                    positionUsdc,
+                    intent,
+                    decision
+            );
+
+            tradeMonitorService.register(record);
+            log.info("--- Trade monitored: Entry {}, TP at {}, SL at {}", actualEthPrice, record.getTakeProfitPrice(), record.getStopLossPrice());
+        }
         // reputation
 //        checkpointService.postReputation(intent, decision, marketState, approved,
 //                receipt.getTransactionHash());
@@ -349,6 +332,28 @@ public class AutonomousTradingOrchestrator {
         boolean approved = receipt.getLogs().stream()
                 .anyMatch(l -> l.getTopics().get(0).contains("536c9b7d")); // TradeApproved topic
 
+        if (approved) {
+            tradesThisHour.incrementAndGet();
+            riskService.onPositionOpened();
+            riskService.incrementTradeCount();
+
+            // CRITICAL FIX: Ensure we use the Market Price, NOT the Wallet Balance
+            double actualEthPrice = marketState.getCurrentPrice().doubleValue();
+
+            double positionUsdc = intent.getAmountUsdScaled().doubleValue() / 100.0;
+
+            TradeRecord record = TradeRecord.fromDecision(
+                    decision.getTradeId(),
+                    agentId,
+                    actualEthPrice,
+                    positionUsdc,
+                    intent,
+                    decision
+            );
+
+            tradeMonitorService.register(record);
+            log.info("--- Trade monitored: Entry {}, TP at {}, SL at {}", actualEthPrice, record.getTakeProfitPrice(), record.getStopLossPrice());
+        }
 
         // check point for validation
         checkpointService.postCheckpoint(intent, decision, marketState, approved,
@@ -357,10 +362,6 @@ public class AutonomousTradingOrchestrator {
         // reputation
 //        checkpointService.postReputation(intent, decision, marketState, approved,
 //                receipt.getTransactionHash());
-
-        tradesThisHour.incrementAndGet();
-        riskService.onPositionClosed();
-        riskService.incrementTradeCount();
 
         log.info("  SELL OK | ${} USD | tx={} | approved = {}",
                 amountUsdScaled.divide(BigInteger.valueOf(100)),

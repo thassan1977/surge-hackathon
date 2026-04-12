@@ -63,6 +63,8 @@ public class AITradeDecision {
     @JsonProperty("tradeId")
     private String tradeId;
 
+    @JsonProperty("vetoTriggered")
+    private String vetoTriggered;
 
     /**
      * Structured verdict from each of the 5 council agents.

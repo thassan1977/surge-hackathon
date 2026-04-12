@@ -103,6 +103,12 @@ public class RiskManagementService {
      * @param currentEquityUsdc current vault balance in USD after the trade
      */
     public synchronized void recordTradeReturn(double pnlPct, double currentEquityUsdc) {
+        double previousBalance = currentBalance.doubleValue();
+        double profitLossUsdc = currentEquityUsdc - previousBalance;
+
+        // Update balance so drawdown stays live
+        updateBalance(BigDecimal.valueOf(currentEquityUsdc));
+
         // Update rolling window
         rollingReturns.addLast(pnlPct);
         if (rollingReturns.size() > ROLLING_WINDOW) {
@@ -119,16 +125,27 @@ public class RiskManagementService {
         // Lifetime counter
         totalTradesEver.incrementAndGet();
 
-        // Update balance so drawdown stays live
-        updateBalance(BigDecimal.valueOf(currentEquityUsdc));
+
 
         // Update ETH equity approximation
         double ethEquity = latestEthPriceUsd > 0 ? currentEquityUsdc / latestEthPriceUsd : 0;
         this.currentEquityEth = ethEquity;
         if (ethEquity > peakEquityEth) peakEquityEth = ethEquity;
 
-        log.debug("Trade recorded | pnl={} equity={} USDC | wins={} losses={} window={}",
-                pnlPct, currentEquityUsdc, winCount, lossCount, rollingReturns.size());
+//        log.debug("Trade recorded | pnl={} equity={} USDC | wins={} losses={} window={}",
+//                pnlPct, currentEquityUsdc, winCount, lossCount, rollingReturns.size());
+        // MISSION CONTROL LOGGING
+        log.info("============== PERFORMANCE UPDATE ==============");
+        log.info("TRADE RESULT:  {}", (pnlPct > 0 ? "PROFIT [▲]" : "LOSS [▼]"));
+        log.info("PnL %:         {}%", String.format("%.2f", pnlPct * 100));
+        log.info("PnL $:         ${}", String.format("%.2f", profitLossUsdc));
+        log.info("---");
+        log.info("CURRENT EQUITY: ${}", String.format("%.2f", currentEquityUsdc));
+        log.info("PEAK EQUITY:    ${}", String.format("%.2f", peakBalance.doubleValue()));
+        log.info("DRAWDOWN:       {}%", String.format("%.2f", getCurrentDrawdownPct() * 100));
+        log.info("SHARPE RATIO:   {}", String.format("%.4f", getSharpeRatio()));
+        log.info("WIN RATE (30):  {}%", String.format("%.1f", getWinRate30() * 100));
+        log.info("================================================");
     }
 
     // ═════════════════════════════════════════════════════════════════════
