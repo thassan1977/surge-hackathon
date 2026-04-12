@@ -394,12 +394,12 @@ public class ValidationCheckpointService {
         } else {
             finalScore = Math.min(100, rawScore);
         }
-        finalScore = Math.max(99,finalScore);
+
         // Detailed Log for Forensic Audit
-//        log.info("[Score Composition] Trade {} | Final: {}/100 | " +
-//                        "Conf: {}/50 (Raw: {}), Apprv: {}/15, Trend: {}/10, RR: {}/10, Mom: {}/5, Reg: {}/5, Cons: {}/5",
-//                tradeId, finalScore, ptsConf, String.format("%.2f", rawConf),
-//                ptsApproved, ptsTrend, ptsRr, ptsMom, ptsRegime, ptsCons);
+        log.info("[Score Composition] Trade {} | Final: {}/100 | " +
+                        "Conf: {}/50 (Raw: {}), Apprv: {}/15, Trend: {}/10, RR: {}/10, Mom: {}/5, Reg: {}/5, Cons: {}/5",
+                tradeId, finalScore, ptsConf, String.format("%.2f", rawConf),
+                ptsApproved, ptsTrend, ptsRr, ptsMom, ptsRegime, ptsCons);
 
         return finalScore;
     }
