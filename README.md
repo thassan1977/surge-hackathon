@@ -69,7 +69,7 @@ A Sepolia RPC Provider (Infura/Alchemy)
 Configuration
 Update src/main/resources/application.properties:
 
-# === OFFICIAL SHARED CONTRACTS ===
+📊 Contract Integration (Sepolia)
 contract.identity=0x97b07dDc405B0c28B17559aFFE63BdB3632d0ca3
 contract.vault=0x0E7CD8ef9743FEcf94f9103033a044caBD45fC90
 contract.router=0xd6A6952545FF6E6E6681c2d15C59f9EB8F40FdBC
@@ -81,15 +81,6 @@ Bash
 ./gradlew build
 java -jar build/libs/palmyra-ai-orchestrator.jar
 
-
-📊 Contract Integration (Sepolia)
-AgentRegistry: 0x97b07dDc...
-
-RiskRouter: 0xd6A69525...
-
-ValidationRegistry: 0x92bF63E5...
-
-HackathonVault: 0x0E7CD8ef...
 
 PalmyraAI Project | Agent ID: 36
 Operator: 0xED1e806796A98725D5B3A07478440977dBE34812
