@@ -3,6 +3,13 @@ PalmyraAI: Java Trading Orchestrator
 The core execution and orchestration engine of PalmyraAI (Agent ID: 36), a fully autonomous trading agent built for the ERC-8004 challenge. This project manages real-time market data ingestion, handles the state machine for open positions, and executes EIP-712 signed intents on the Sepolia testnet.
 the code is finalized with help by Gemini and Deepseek chat agetns 
 
+![System Running](docs/running_java.png)
+
+![Live leaderboard](docs/live_02.png)
+
+![Live leaderboard](docs/live_01.png)
+
+
 🚀 Overview
 The Java Orchestrator acts as the "Central Nervous System" of the agent. It bridges the gap between high-frequency market data (Binance), the AI Council (Python Brain), and the Ethereum blockchain.
 
